@@ -90,6 +90,14 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
                 format: { type: 'audio/pcmu' },
                 transcription: {
                   model: this.model,
+                  language: 'en',
+                  // Bias the decoder toward the words the menu needs. Over an
+                  // 8 kHz phone codec a bare "Claude" came back as Bob, blob,
+                  // klob, odd and quad; naming the agents here fixes that.
+                  prompt:
+                    process.env.CALLME_STT_PROMPT ||
+                    'The caller is talking to an AI coding assistant on the phone. ' +
+                      'Expected names: Claude, Claude Code, Hermes, Codex.',
                 },
                 turn_detection: {
                   type: 'server_vad',

@@ -70,6 +70,9 @@ Environment:
                               is greeted by name (e.g. +15551234567=Alice).
   CALLME_INBOUND_ALLOW_FROM   Comma-separated E.164 numbers allowed to call in.
                               Defaults to CALLME_USER_PHONE_NUMBER (just you).
+  CALLME_STT_PROMPT           Vocabulary hint for the transcriber. Defaults to
+                              naming the agents, which is what lets a one-word
+                              "Claude" survive the phone codec.
 
 Setup:
   1. In the Telnyx portal, point your number's Voice API application webhook
@@ -191,9 +194,41 @@ const AGENT_NAME_RE: Record<AgentBackend, RegExp> = {
   codex: /\b(codex|code ?x)\b/i,
 };
 
+/**
+ * Looser patterns for the menu step only. A one-word answer over a phone
+ * codec is the worst case for STT: "Claude" was observed coming back as
+ * "Bob", "blob", "klob", "odd", "quad" and "Blob code." At the menu the only
+ * choices are these agents, so a false positive is harmless — but failing to
+ * match leaves the caller stuck re-saying one word. Not used for mid-call
+ * switching, where AGENT_NAME_RE stays strict.
+ */
+const AGENT_MENU_RE: Record<AgentBackend, RegExp> = {
+  'claude-code':
+    /\b(claude|claud|clause|cloud|clawed|claw|clod|cod|code|coad|bob|blob|klob|clob|glob|odd|aud|quad|laud|lord|flawed|fraud|god)\b/i,
+  hermes: /\b(hermes|herm[eè]s|her ?mees|her ?mess|hermis|hermies|herpes|hermeez|harmies)\b/i,
+  codex: /\b(codex|code ?x|kodex)\b/i,
+};
+
 /** Which menu agent, if any, the caller named. */
 function pickAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
   return menu.find((b) => AGENT_NAME_RE[b].test(transcript));
+}
+
+/**
+ * Menu selection: the agent's name (loosely matched), or its position in the
+ * menu as a digit — "one", "1", "two". Digits survive the phone codec far
+ * better than a single proper noun, so they're the fallback we offer after a
+ * failed attempt.
+ */
+function pickMenuAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
+  const byName = menu.find((b) => AGENT_MENU_RE[b].test(transcript));
+  if (byName) return byName;
+  const digits = spokenDigits(transcript);
+  if (digits.length === 1) {
+    const idx = Number(digits) - 1;
+    if (idx >= 0 && idx < menu.length) return menu[idx];
+  }
+  return undefined;
 }
 
 /** "Switch to Hermes", "talk to Claude", "give me Hermes" mid-call. */
@@ -255,6 +290,9 @@ async function main(): Promise<void> {
   const routes = numberRoutes();
   const menu = agentMenu();
   const menuPrompt = `Say ${menu.map(shortName).join(' or ')}.`;
+  // After a miss, offer positions instead: single digits transcribe reliably
+  // over a phone line where a bare name does not.
+  const menuRetryPrompt = `Say ${menu.map((b, i) => `${i + 1} for ${shortName(b)}`).join(', or ')}.`;
   if (menu.length > 1) console.error(`Menu: unrouted numbers ask for ${menu.map(backendLabel).join(' or ')}`);
   const greetingFor = (name: string | undefined, backend: AgentBackend) =>
     args.greeting ||
@@ -301,6 +339,7 @@ async function main(): Promise<void> {
 
     let verified = !pin;
     let pinAttempts = 0;
+    let menuMisses = 0;
 
     const ready = (b: AgentBackend) => `You're talking to ${backendLabel(b)}. What's on your mind?`;
     const choose = (b: AgentBackend, history: ConversationHistory) => {
@@ -343,10 +382,12 @@ async function main(): Promise<void> {
         }
 
         if (!chosen) {
-          const picked = pickAgent(trimmed, menu);
+          const picked = pickMenuAgent(trimmed, menu);
           if (!picked) {
             history.length = 0;
-            return `Sorry. ${menuPrompt}`;
+            menuMisses += 1;
+            console.error(`[inbound] menu: no match for ${JSON.stringify(trimmed)}`);
+            return `Sorry. ${menuMisses === 1 ? menuPrompt : menuRetryPrompt}`;
           }
           choose(picked, history);
           return ready(picked);
