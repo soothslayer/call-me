@@ -23,6 +23,8 @@ import {
   isAgentBackend,
   backendLabel,
   runAgentTurn,
+  runAgentTurnStream,
+  supportsStreaming,
   type AgentBackend,
   type ConversationHistory,
 } from './backends.js';
@@ -33,6 +35,7 @@ interface InboundArgs {
   farewell: string;
   backendTimeoutMs: number;
   cwd: string;
+  noStream: boolean;
   help: boolean;
 }
 
@@ -50,6 +53,9 @@ Options:
   --backend-timeout-ms N  Max ms to wait for the agent per turn (default: 120000)
   --cwd <dir>             Working directory for the agent subprocess
                           (default: current directory)
+  --no-stream             Wait for the agent's full reply before speaking
+                          (default: stream sentences as the agent produces
+                          them, for lower perceived latency)
   --help                  Show this help
 
 Environment:
@@ -95,6 +101,7 @@ function parseArgs(args: string[]): InboundArgs {
     farewell: 'Talk soon!',
     backendTimeoutMs: 120000,
     cwd: process.cwd(),
+    noStream: false,
     help: false,
   };
 
@@ -119,6 +126,9 @@ function parseArgs(args: string[]): InboundArgs {
         break;
       case '--cwd':
         result.cwd = args[++i];
+        break;
+      case '--no-stream':
+        result.noStream = true;
         break;
       default:
         if (arg.startsWith('--backend=')) result.backend = arg.slice('--backend='.length) as AgentBackend;
@@ -403,18 +413,42 @@ async function main(): Promise<void> {
           }
         }
 
-        try {
-          return await runAgentTurn(backend, history, trimmed, {
-            timeoutMs: args.backendTimeoutMs,
-            cwd: args.cwd,
-            callerName,
-            signal,
-          });
-        } catch (error) {
-          if (signal.aborted) return '';  // caller said stop; the call manager handles it
-          console.error(`[inbound] Agent turn failed:`, error instanceof Error ? error.message : error);
-          return "Sorry, I hit a snag on that one. What else is on your mind?";
+        // `backend`, not args.backend: the caller may have chosen from the
+        // menu or switched agents mid-call.
+        const turnOptions = {
+          timeoutMs: args.backendTimeoutMs,
+          cwd: args.cwd,
+          callerName,
+          signal,
+        };
+        // hermes has no JSONL mode, so it always takes the blocking path.
+        if (args.noStream || !supportsStreaming(backend)) {
+          try {
+            return await runAgentTurn(backend, history, trimmed, turnOptions);
+          } catch (error) {
+            if (signal.aborted) return '';  // caller said stop; the call manager handles it
+            console.error(`[inbound] Agent turn failed:`, error instanceof Error ? error.message : error);
+            return "Sorry, I hit a snag on that one. What else is on your mind?";
+          }
         }
+        // Streaming: sentences are spoken as the agent produces them. A
+        // failure before anything was spoken degrades to an apology; if the
+        // caller said stop, stay silent and let the call manager handle it.
+        return (async function* () {
+          let yielded = false;
+          try {
+            for await (const sentence of runAgentTurnStream(backend, history, trimmed, turnOptions)) {
+              yielded = true;
+              yield sentence;
+            }
+          } catch (error) {
+            if (signal.aborted) return;
+            console.error(`[inbound] Agent stream failed:`, error instanceof Error ? error.message : error);
+          }
+          if (!yielded && !signal.aborted) {
+            yield "Sorry, I hit a snag on that one. What else is on your mind?";
+          }
+        })();
       },
     };
 

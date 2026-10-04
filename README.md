@@ -191,7 +191,16 @@ Options:
 ```bash
 bun run inbound --backend codex --cwd ~/my-project   # agent's working directory
 bun run inbound --backend claude-code --backend-timeout-ms 180000
+bun run inbound --backend codex --no-stream          # wait for the full reply before speaking
 ```
+
+**Latency.** By default the agent's reply is *streamed*: the CLI runs with
+`--output-format stream-json` (Claude Code) or `--json` (Codex), partial
+text is split into sentences, and each sentence goes to TTS as soon as it
+completes — so you hear the first sentence while the agent is still
+generating the rest. Streaming is message-level, not token-level, so the
+biggest win is on longer or multi-part replies. Fenced code blocks are
+dropped rather than read aloud.
 
 Security notes:
 

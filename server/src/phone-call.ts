@@ -53,12 +53,14 @@ export interface InboundHooks {
   /**
    * Turn a caller utterance into the agent's spoken reply.
    * Return null to end the call (farewell is spoken, then hangup).
+   * May alternatively return an AsyncIterable of sentences, which are
+   * spoken as they arrive (streaming mode).
    */
   onUserMessage: (
     transcript: string,
     history: Array<{ speaker: 'user' | 'agent'; message: string }>,
     signal: AbortSignal
-  ) => Promise<string | null>;
+  ) => Promise<string | AsyncIterable<string> | null>;
   /**
    * Spoken if the caller talks while the agent is still thinking, e.g.
    * "Claude Code is thinking. Say stop to interrupt." Saying "stop" then
@@ -702,8 +704,14 @@ export class CallManager {
         }
         if (reply === null) break;
 
-        history.push({ speaker: 'agent', message: reply });
-        await this.speak(state, reply);
+        if (typeof reply === 'string') {
+          history.push({ speaker: 'agent', message: reply });
+          await this.speak(state, reply);
+        } else {
+          // Streaming reply: speak each sentence as the agent produces it.
+          const spoken = await this.speakReplyStream(state, reply);
+          history.push({ speaker: 'agent', message: spoken });
+        }
         if (state.interrupted) {
           history[history.length - 1].message += ' [cut off: the caller interrupted]';
         }
@@ -903,6 +911,52 @@ export class CallManager {
     text: string,
     synthesizeStream: (text: string) => AsyncGenerator<Buffer>
   ): Promise<void> {
+    async function* pcm(): AsyncGenerator<Buffer> {
+      yield* synthesizeStream(text);
+    }
+    return this.speakPcmStream(state, pcm());
+  }
+
+  /**
+   * Speak a stream of sentences, synthesizing each one as it arrives so
+   * playback starts before the full reply exists. Returns the complete
+   * spoken text for conversation history.
+   */
+  private async speakReplyStream(state: CallState, sentences: AsyncIterable<string>): Promise<string> {
+    const tts = this.config.providers.tts;
+    const spoken: string[] = [];
+
+    async function* pcm(): AsyncGenerator<Buffer> {
+      for await (const sentence of sentences) {
+        if (state.hungUp) break;
+        const clean = sentence.trim();
+        if (!clean) continue;
+        spoken.push(clean);
+        console.error(`[${state.callId}] Speaking (stream): ${clean.substring(0, 60)}...`);
+        if (tts.synthesizeStream) {
+          yield* tts.synthesizeStream(clean);
+        } else {
+          yield await tts.synthesize(clean);
+        }
+      }
+    }
+
+    await this.speakPcmStream(state, pcm());
+
+    if (spoken.length === 0) {
+      throw new Error('Agent produced no speakable output');
+    }
+    return spoken.join(' ');
+  }
+
+  /**
+   * Core PCM->mu-law->websocket pump shared by batch and streaming speech.
+   * Jitter-buffers 100ms once at the start, then paces 20ms chunks.
+   */
+  private async speakPcmStream(
+    state: CallState,
+    pcmStream: AsyncGenerator<Buffer>
+  ): Promise<void> {
     let pendingPcm = Buffer.alloc(0);
     let pendingMuLaw = Buffer.alloc(0);
     const OUTPUT_CHUNK_SIZE = 160; // 20ms at 8kHz
@@ -924,8 +978,9 @@ export class CallManager {
       }
     };
 
-    for await (const chunk of synthesizeStream(text)) {
-      if (state.interrupted) break;
+    for await (const chunk of pcmStream) {
+      // interrupted = barge-in / "stop"; hungUp = caller gone. Either ends playback.
+      if (state.interrupted || state.hungUp) break;
       pendingPcm = Buffer.concat([pendingPcm, chunk]);
 
       const completeUnits = Math.floor(pendingPcm.length / SAMPLES_PER_RESAMPLE);
