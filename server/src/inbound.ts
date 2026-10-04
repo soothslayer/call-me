@@ -1,0 +1,241 @@
+#!/usr/bin/env bun
+/**
+ * call-me inbound mode: dial your Telnyx number and talk to an agent.
+ *
+ * Answers incoming calls on your Telnyx number and bridges the caller into a
+ * voice conversation with Claude Code or Codex. Each turn: your speech is
+ * transcribed, sent to the agent CLI in non-interactive mode (with full
+ * conversation history), and the agent's reply is spoken back.
+ *
+ * Usage:
+ *   bun run inbound --backend claude-code
+ *   bun run inbound --backend codex --greeting "Hey! Codex here."
+ *
+ * Security: by default only CALLME_USER_PHONE_NUMBER may call in. Extra
+ * numbers via CALLME_INBOUND_ALLOW_FROM (comma-separated E.164). Set
+ * CALLME_INBOUND_ALLOW_FROM to empty to allow any caller (not recommended).
+ */
+
+import { CallManager, loadServerConfig } from './phone-call.js';
+import { startNgrok, stopNgrok } from './ngrok.js';
+import {
+  isAgentBackend,
+  backendLabel,
+  runAgentTurn,
+  type AgentBackend,
+  type ConversationHistory,
+} from './backends.js';
+
+interface InboundArgs {
+  backend: AgentBackend;
+  greeting: string;
+  farewell: string;
+  backendTimeoutMs: number;
+  cwd: string;
+  help: boolean;
+}
+
+function printHelp(): void {
+  console.log(`
+call-me inbound mode — dial your Telnyx number and talk to an agent.
+
+Usage:
+  bun run inbound --backend <claude-code|codex> [options]
+
+Options:
+  --backend <name>        Agent to talk to: claude-code or codex (required)
+  --greeting <text>       Spoken when the call is answered
+  --farewell <text>       Spoken before hanging up
+  --backend-timeout-ms N  Max ms to wait for the agent per turn (default: 120000)
+  --cwd <dir>             Working directory for the agent subprocess
+                          (default: current directory)
+  --help                  Show this help
+
+Environment:
+  Same CALLME_* variables as the MCP server / CLI (see README), plus:
+  CALLME_CALLER_NAMES         Comma-separated number=name pairs, so each caller
+                              is greeted by name (e.g. +15551234567=Alice).
+  CALLME_INBOUND_ALLOW_FROM   Comma-separated E.164 numbers allowed to call in.
+                              Defaults to CALLME_USER_PHONE_NUMBER (just you).
+
+Setup:
+  1. In the Telnyx portal, point your number's Voice API application webhook
+     at https://<your-ngrok-url>/twiml (same URL the outbound mode uses).
+  2. Run this command, then dial your Telnyx number (CALLME_PHONE_NUMBER).
+  3. Say "goodbye" (or hang up) to end the call.
+
+Notes:
+  - Codex runs with a read-only sandbox so approval prompts can't stall a call.
+  - Claude Code follows your normal CLI permissions for tool use.
+  - Each agent turn spawns a fresh non-interactive run; conversation history
+    is carried in the prompt.
+`);
+}
+
+function parseArgs(args: string[]): InboundArgs {
+  const result: InboundArgs = {
+    backend: '' as AgentBackend,
+    greeting: '',
+    farewell: 'Talk soon!',
+    backendTimeoutMs: 120000,
+    cwd: process.cwd(),
+    help: false,
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    switch (arg) {
+      case '--help':
+      case '-h':
+        result.help = true;
+        break;
+      case '--backend':
+        result.backend = args[++i] as AgentBackend;
+        break;
+      case '--greeting':
+        result.greeting = args[++i];
+        break;
+      case '--farewell':
+        result.farewell = args[++i];
+        break;
+      case '--backend-timeout-ms':
+        result.backendTimeoutMs = parseInt(args[++i], 10);
+        break;
+      case '--cwd':
+        result.cwd = args[++i];
+        break;
+      default:
+        if (arg.startsWith('--backend=')) result.backend = arg.slice('--backend='.length) as AgentBackend;
+        else if (arg.startsWith('--greeting=')) result.greeting = arg.slice('--greeting='.length);
+        else if (arg.startsWith('--farewell=')) result.farewell = arg.slice('--farewell='.length);
+        else if (arg.startsWith('--cwd=')) result.cwd = arg.slice('--cwd='.length);
+        else {
+          console.error(`Unknown argument: ${arg}`);
+          printHelp();
+          process.exit(1);
+        }
+    }
+  }
+  return result;
+}
+
+/** Normalize a phone number for comparison (digits only). */
+function normalizeNumber(n: string): string {
+  return n.replace(/\D/g, '');
+}
+
+function allowedCallers(): string[] | null {
+  // null = allow everyone (explicit opt-in via empty env var)
+  const raw = process.env.CALLME_INBOUND_ALLOW_FROM;
+  if (raw !== undefined) {
+    const list = raw.split(',').map((s) => normalizeNumber(s.trim())).filter(Boolean);
+    return list.length > 0 ? list : null;
+  }
+  const mine = process.env.CALLME_USER_PHONE_NUMBER;
+  return mine ? [normalizeNumber(mine)] : [];
+}
+
+/**
+ * Parse CALLME_CALLER_NAMES ("+15551234567=Alice,+15557654321=Bob") into
+ * a digits-only number -> name map, used to greet each caller by name.
+ */
+function callerNames(): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const entry of (process.env.CALLME_CALLER_NAMES || '').split(',')) {
+    const [num, name] = entry.split('=').map((s) => s.trim());
+    if (num && name) names.set(normalizeNumber(num), name);
+  }
+  return names;
+}
+
+const GOODBYE_RE = /^(goodbye|bye( bye)?|hang up|that'?s all|that'?s it|talk (to you )?later)\.?$/i;
+
+async function main(): Promise<void> {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.help) {
+    printHelp();
+    process.exit(0);
+  }
+
+  if (!isAgentBackend(args.backend)) {
+    console.error('Error: --backend must be one of: claude-code, codex\n');
+    printHelp();
+    process.exit(1);
+  }
+
+  const names = callerNames();
+  const greetingFor = (name: string | undefined) =>
+    args.greeting ||
+    `Hey${name ? ` ${name}` : ''}! You're talking to ${backendLabel(args.backend)}. What's on your mind?`;
+
+  const allowList = allowedCallers();
+  if (allowList === null) {
+    console.error('Warning: CALLME_INBOUND_ALLOW_FROM is empty — ANY caller can talk to your agent.');
+  } else {
+    console.error(`Inbound allowlist: ${allowList.join(', ') || '(none — all calls will be rejected)'}`);
+  }
+
+  // Same startup path as the CLI: config, HTTP server, ngrok tunnel.
+  const config = loadServerConfig('');
+  const callManager = new CallManager(config);
+  const port = await callManager.startServer();
+  const publicUrl = await startNgrok(port);
+  callManager.setPublicUrl(publicUrl);
+
+  console.error(`\nInbound mode ready. Dial ${config.phoneNumber} to talk to ${backendLabel(args.backend)}.`);
+  console.error('Press Ctrl+C to stop.\n');
+
+  callManager.onInboundCall = async (callControlId: string, from: string) => {
+    if (allowList !== null && !allowList.includes(normalizeNumber(from))) {
+      console.error(`[inbound] Rejecting call from ${from} (not on allowlist)`);
+      try {
+        await config.providers.phone.hangup(callControlId);
+      } catch (error) {
+        console.error('[inbound] Failed to hang up rejected call:', error instanceof Error ? error.message : error);
+      }
+      return;
+    }
+
+    const callerName = names.get(normalizeNumber(from));
+    console.error(`[inbound] Caller: ${callerName ?? 'unnamed'} (${from})`);
+
+    await callManager.runInboundConversation(callControlId, from, {
+      greeting: greetingFor(callerName),
+      farewell: args.farewell,
+      onUserMessage: async (transcript: string, history: ConversationHistory) => {
+        const trimmed = transcript.trim();
+        if (GOODBYE_RE.test(trimmed)) {
+          return null; // triggers farewell + hangup
+        }
+        try {
+          return await runAgentTurn(args.backend, history, trimmed, {
+            timeoutMs: args.backendTimeoutMs,
+            cwd: args.cwd,
+            callerName,
+          });
+        } catch (error) {
+          console.error(`[inbound] Agent turn failed:`, error instanceof Error ? error.message : error);
+          return "Sorry, I hit a snag on that one. What else is on your mind?";
+        }
+      },
+    });
+  };
+
+  const shutdown = async () => {
+    console.error('\nShutting down...');
+    await stopNgrok().catch(() => {});
+    await callManager.shutdown();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // Run until killed.
+  await new Promise(() => {});
+}
+
+main().catch((error) => {
+  console.error('Fatal error:', error instanceof Error ? error.message : error);
+  process.exit(1);
+});

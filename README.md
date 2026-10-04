@@ -116,6 +116,97 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 
 Restart Claude Code. Done!
 
+### Other agents: Codex, Muse, and anything with a shell
+
+The MCP server (`server/src/index.ts`) is a plain stdio server — only the
+plugin packaging above is Claude Code-specific. Steps 1–3 (provider accounts
+and environment variables) are the same for every agent.
+
+**Codex.** Point Codex at the same server. Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.callme]
+command = "bun"
+args = ["run", "/absolute/path/to/call-me/server/src/index.ts"]
+tool_timeout_sec = 300
+
+[mcp_servers.callme.env]
+CALLME_PHONE_PROVIDER = "telnyx"
+CALLME_PHONE_ACCOUNT_SID = "your-connection-id"
+CALLME_PHONE_AUTH_TOKEN = "your-api-key"
+CALLME_PHONE_NUMBER = "+15551234567"
+CALLME_USER_PHONE_NUMBER = "+15559876543"
+CALLME_OPENAI_API_KEY = "sk-..."
+CALLME_NGROK_AUTHTOKEN = "your-ngrok-token"
+```
+
+(Or: `codex mcp add callme -- bun run /absolute/path/to/call-me/server/src/index.ts`,
+then restart Codex.) Calls can take a few minutes — the raised
+`tool_timeout_sec` keeps Codex from giving up mid-conversation.
+
+**Muse / shell agents (no MCP client needed).** This fork adds a standalone
+CLI that drives the same call flow without an MCP client:
+
+```bash
+cd server
+bun run call --message "Hey! Your build finished. Want me to deploy it?"
+```
+
+The user's spoken reply is printed to stdout so the agent can capture it.
+Options:
+
+```bash
+bun run call --message "..." --goodbye "Talk soon!"   # closing line
+bun run call --message "..." --interactive             # follow-up prompts on stdin (empty line hangs up)
+```
+
+Set `CALLME_TRANSCRIPT_TIMEOUT_MS` to bound how long each listen waits for a
+reply (default 180000 ms). Same `CALLME_*` environment variables as above.
+
+### Inbound mode: dial your number and talk to an agent
+
+The reverse direction also works. Instead of the agent calling you, **you
+call your Telnyx number** and get bridged into a voice conversation with
+Claude Code or Codex:
+
+```bash
+cd server
+bun run inbound --backend claude-code
+bun run inbound --backend codex --greeting "Hey! Codex here. What's up?"
+```
+
+How it works: the server answers the incoming call, transcribes what you say,
+sends it to the agent CLI in non-interactive mode (`claude -p` /
+`codex exec`, with the full conversation history in the prompt), and speaks
+the agent's reply back. Say "goodbye" (or just hang up) to end the call.
+
+Setup is the same webhook you already configured for outbound calls — in the
+Telnyx portal, point your number's Voice API application at
+`https://<your-ngrok-url>/twiml`. Then run the command above and dial
+`CALLME_PHONE_NUMBER`.
+
+Options:
+
+```bash
+bun run inbound --backend codex --cwd ~/my-project   # agent's working directory
+bun run inbound --backend claude-code --backend-timeout-ms 180000
+```
+
+Security notes:
+
+- **Inbound requires Telnyx** (`CALLME_PHONE_PROVIDER=telnyx`). Twilio
+  inbound is not implemented yet.
+- **Caller allowlist.** By default only `CALLME_USER_PHONE_NUMBER` (you) can
+  call in — anyone else is hung up immediately. Add numbers with
+  `CALLME_INBOUND_ALLOW_FROM=+15551234567,+15557654321`. Setting it empty
+  allows any caller (not recommended: strangers would get a voice line into
+  your coding agents).
+- **Caller names.** Set `CALLME_CALLER_NAMES=+15551234567=Alice,+15557654321=Bob`
+  so the greeting and the agent's prompt use the caller's name. Unnamed
+  callers get a generic greeting.
+- Codex runs with a **read-only sandbox**, so approval prompts can't stall a
+  call. Claude Code follows your normal CLI permissions for tool use.
+
 ---
 
 ## How It Works

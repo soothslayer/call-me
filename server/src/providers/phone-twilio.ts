@@ -107,6 +107,14 @@ export class TwilioPhoneProvider implements PhoneProvider {
   }
 
   /**
+   * Answer an incoming call. Not implemented for Twilio — inbound mode
+   * currently supports the Telnyx provider only.
+   */
+  async answerCall(_callControlId: string): Promise<void> {
+    throw new Error('Inbound calls are only supported with the Telnyx provider (CALLME_PHONE_PROVIDER=telnyx)');
+  }
+
+  /**
    * Get TwiML response for connecting media stream
    * This is called when Twilio requests the webhook URL after call is answered
    */
