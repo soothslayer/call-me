@@ -819,6 +819,7 @@ export class CallManager {
         if (STOP_RE.test(first.text)) {
           abort.abort();
           await replyPromise.catch(() => {});
+          stt.clearQueued?.();  // same reason as in handleSpokenStop
           return STOPPED;
         }
         await this.speak(state, thinkingNotice);
@@ -842,11 +843,32 @@ export class CallManager {
    * Returns true to consume the transcript so it isn't treated as a turn.
    */
   private handleSpokenStop(state: CallState, text: string): boolean {
-    if (!state.speaking || !STOP_RE.test(text)) return false;
-    console.error(`[${state.callId}] Caller said "${text}" while agent was talking, stopping playback`);
-    this.stopPlayback(state);
-    state.stoppedBySpeech = true;
-    return true;
+    if (!state.speaking) return false;
+
+    if (STOP_RE.test(text)) {
+      console.error(`[${state.callId}] Caller said "${text}" while agent was talking, stopping playback`);
+      this.stopPlayback(state);
+      state.stoppedBySpeech = true;
+      // Anything said before the stop is no longer what the caller wants.
+      // Leaving it queued makes the next listen() return the stale request
+      // instantly and swallow whatever they ask for next.
+      state.sttSession?.clearQueued?.();
+      return true;
+    }
+
+    // Not a stop, and barge-in is off so the agent keeps talking over them.
+    // Discard rather than queue: speech captured mid-playback is usually a
+    // fragment — the caller pauses when they hear the agent still going, so
+    // "Tell me a story about a pirate" commits as just "Tell me" and would
+    // become the next turn. They restate once the line is clear.
+    if (process.env.CALLME_BARGE_IN === 'false') {
+      console.error(`[${state.callId}] Discarding speech heard while agent was talking: ${JSON.stringify(text)}`);
+      return true;
+    }
+
+    // Barge-in enabled: playback already stopped, so treat what they said as
+    // the next turn.
+    return false;
   }
 
   private stopPlayback(state: CallState): void {

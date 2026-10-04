@@ -112,6 +112,13 @@ export interface RealtimeSTTSession {
   cancelWait?(): void;
 
   /**
+   * Drop any queued transcripts. Used when the caller says "stop": whatever
+   * they were saying before is no longer what they want, and replaying it
+   * would swallow the request they make next.
+   */
+  clearQueued?(): void;
+
+  /**
    * Close the session
    */
   close(): void;

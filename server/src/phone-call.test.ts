@@ -124,6 +124,69 @@ describe('speakReplyStream', () => {
   });
 });
 
+describe('handleSpokenStop', () => {
+  const withBargeIn = (value: string | undefined, fn: () => void) => {
+    const prev = process.env.CALLME_BARGE_IN;
+    if (value === undefined) delete process.env.CALLME_BARGE_IN;
+    else process.env.CALLME_BARGE_IN = value;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.CALLME_BARGE_IN;
+      else process.env.CALLME_BARGE_IN = prev;
+    }
+  };
+
+  function speakingState() {
+    const state = fakeState();
+    state.speaking = true;
+    let cleared = 0;
+    state.sttSession = { clearQueued: () => { cleared++; } };
+    return { state, cleared: () => cleared };
+  }
+
+  test('"stop" drops queued transcripts, so a stale request cannot preempt the next one', () => {
+    const { mgr } = fakeManager([]);
+    const { state, cleared } = speakingState();
+    withBargeIn('false', () => {
+      expect(mgr.handleSpokenStop(state, 'Stop')).toBe(true);
+      expect(state.stoppedBySpeech).toBe(true);
+      expect(state.interrupted).toBe(true);
+      expect(cleared()).toBe(1);
+    });
+  });
+
+  test('a fragment heard mid-playback is discarded, not queued as the next turn', () => {
+    const { mgr } = fakeManager([]);
+    const { state, cleared } = speakingState();
+    withBargeIn('false', () => {
+      // "Tell me a story about a pirate" committed as just "Tell me" because
+      // the caller paused on hearing the agent still talking.
+      expect(mgr.handleSpokenStop(state, 'Tell me')).toBe(true);
+      expect(state.interrupted).toBe(false);
+      expect(state.stoppedBySpeech).toBe(false);
+      expect(cleared()).toBe(0); // discarding one is not flushing the queue
+    });
+  });
+
+  test('with barge-in on, mid-playback speech is kept for the next turn', () => {
+    const { mgr } = fakeManager([]);
+    const { state } = speakingState();
+    withBargeIn(undefined, () => {
+      expect(mgr.handleSpokenStop(state, 'Tell me')).toBe(false);
+    });
+  });
+
+  test('speech while the agent is silent is left alone', () => {
+    const { mgr } = fakeManager([]);
+    const state = fakeState(); // speaking = false
+    withBargeIn('false', () => {
+      expect(mgr.handleSpokenStop(state, 'Tell me')).toBe(false);
+      expect(mgr.handleSpokenStop(state, 'Stop')).toBe(false);
+    });
+  });
+});
+
 describe('SentenceBuffer', () => {
   const collect = (deltas: string[]): string[] => {
     const sb = new SentenceBuffer();

@@ -276,6 +276,17 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
     this.onTranscriptCallback = null;
   }
 
+  clearQueued(): void {
+    if (this.queuedTranscripts.length) {
+      console.error(
+        `[RealtimeSTT] Dropping ${this.queuedTranscripts.length} queued transcript(s): ` +
+          this.queuedTranscripts.map((t) => JSON.stringify(t)).join(', ')
+      );
+      this.queuedTranscripts = [];
+    }
+    this.pendingTranscript = '';
+  }
+
   close(): void {
     this.closed = true;  // Prevent reconnection attempts
     if (this.ws) {
