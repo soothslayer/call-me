@@ -10,6 +10,7 @@
     "dev": "bun --watch src/index.ts",
     "call": "bun run src/cli.ts",
     "inbound": "bun run src/inbound.ts",
+    "test": "bun test",
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

@@ -1,0 +1,170 @@
+/**
+ * Regression tests for the streamed-reply path.
+ *
+ * Run with `bun test`. These are deliberately narrow: they cover the two
+ * bugs that reached a real phone call, where the behaviour looked correct
+ * by inspection.
+ */
+
+import { describe, expect, test } from 'bun:test';
+import { CallManager } from './phone-call.js';
+import { SentenceBuffer } from './backends.js';
+
+function fakeState(): any {
+  return {
+    callId: 'test',
+    callControlId: null,
+    userPhoneNumber: '+10000000000',
+    ws: null,
+    streamSid: null,
+    streamingReady: true,
+    wsToken: '',
+    conversationHistory: [],
+    startTime: Date.now(),
+    hungUp: false,
+    sttSession: null,
+    speaking: false,
+    interrupted: false,
+    stoppedBySpeech: false,
+  };
+}
+
+function fakeManager(synthesized: string[]) {
+  const config: any = {
+    providers: {
+      tts: {
+        async synthesize(text: string) {
+          synthesized.push(text);
+          return Buffer.alloc(480);
+        },
+      },
+      phone: {},
+      stt: {},
+    },
+    transcriptTimeoutMs: 1000,
+  };
+  return { mgr: new CallManager(config) as any, config };
+}
+
+describe('speakReplyStream', () => {
+  test('a spoken "stop" cuts a streamed reply off', async () => {
+    const synthesized: string[] = [];
+    const { mgr, config } = fakeManager(synthesized);
+    const state = fakeState();
+
+    // The caller says "stop" while the first sentence is being synthesized.
+    // state.speaking must already be true, or handleSpokenStop discards it.
+    let speakingDuringFirst: boolean | undefined;
+    let stopConsumed: boolean | undefined;
+    const realSynthesize = config.providers.tts.synthesize;
+    config.providers.tts.synthesize = async function (text: string) {
+      if (speakingDuringFirst === undefined) {
+        speakingDuringFirst = state.speaking;
+        stopConsumed = mgr.handleSpokenStop(state, 'Stop.');
+      }
+      return realSynthesize.call(this, text);
+    };
+
+    let pulled = 0;
+    async function* sentences() {
+      for (const s of ['One.', 'Two.', 'Three.', 'Four.']) {
+        pulled++;
+        yield s;
+      }
+    }
+
+    const spoken = await mgr.speakReplyStream(state, sentences());
+
+    expect(speakingDuringFirst).toBe(true);
+    expect(stopConsumed).toBe(true);
+    expect(state.interrupted).toBe(true);
+    expect(state.stoppedBySpeech).toBe(true);
+    // Stop pulling from the agent instead of speaking the rest of the reply.
+    expect(pulled).toBe(1);
+    expect(synthesized).toEqual(['One.']);
+    expect(spoken).toBe('One.');
+    // The flag has to be cleared, or the next turn starts "already speaking".
+    expect(state.speaking).toBe(false);
+  });
+
+  test('an uninterrupted reply speaks every sentence', async () => {
+    const synthesized: string[] = [];
+    const { mgr } = fakeManager(synthesized);
+    const state = fakeState();
+
+    async function* sentences() {
+      yield 'First.';
+      yield 'Second.';
+    }
+
+    const spoken = await mgr.speakReplyStream(state, sentences());
+    expect(synthesized).toEqual(['First.', 'Second.']);
+    expect(spoken).toBe('First. Second.');
+    expect(state.interrupted).toBe(false);
+    expect(state.speaking).toBe(false);
+  });
+
+  test('being stopped before any sentence is not an error', async () => {
+    const synthesized: string[] = [];
+    const { mgr } = fakeManager(synthesized);
+    const state = fakeState();
+
+    // The caller stops while the agent is still thinking, so the stream ends
+    // without ever yielding a sentence.
+    async function* sentences(): AsyncGenerator<string> {
+      mgr.handleSpokenStop(state, 'stop');
+      return;
+    }
+
+    // Must not throw: the throw propagates out of the turn and ends the call.
+    const spoken = await mgr.speakReplyStream(state, sentences());
+    expect(spoken).toBe('');
+    expect(state.interrupted).toBe(true);
+    expect(synthesized).toEqual([]);
+  });
+});
+
+describe('SentenceBuffer', () => {
+  const collect = (deltas: string[]): string[] => {
+    const sb = new SentenceBuffer();
+    const out: string[] = [];
+    for (const d of deltas) out.push(...sb.push(d));
+    out.push(...sb.flush());
+    return out;
+  };
+
+  test('does not split a version number at a delta boundary', () => {
+    // Mid-stream, "...version 26." looked like a complete sentence.
+    expect(collect(['This Mac runs macOS 26.', '6.2.', " That's Tahoe."])).toEqual([
+      'This Mac runs macOS 26.6.2.',
+      "That's Tahoe.",
+    ]);
+  });
+
+  test('does not split a decimal', () => {
+    expect(collect(['The total is $4.', '50 even. ', 'Thanks.'])).toEqual([
+      'The total is $4.50 even.',
+      'Thanks.',
+    ]);
+  });
+
+  test('splits ordinary sentences', () => {
+    expect(collect(['Hello there. ', 'How are you? ', 'Fine.'])).toEqual([
+      'Hello there.',
+      'How are you?',
+      'Fine.',
+    ]);
+  });
+
+  test('keeps an abbreviation attached to its sentence', () => {
+    expect(collect(['I saw Dr. ', 'Smith today. ', 'He was late.'])).toEqual([
+      'I saw Dr. Smith today.',
+      'He was late.',
+    ]);
+  });
+
+  test('never emits a code fence', () => {
+    const out = collect(['Here you go. ', '```\nrm -rf /\n```', ' All done.']);
+    expect(out.join(' ')).not.toContain('rm -rf');
+  });
+});

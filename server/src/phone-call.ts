@@ -928,7 +928,9 @@ export class CallManager {
 
     async function* pcm(): AsyncGenerator<Buffer> {
       for await (const sentence of sentences) {
-        if (state.hungUp) break;
+        // interrupted = stopped / barged in. Stop pulling from the agent
+        // rather than synthesizing a sentence nobody will hear.
+        if (state.hungUp || state.interrupted) break;
         const clean = sentence.trim();
         if (!clean) continue;
         spoken.push(clean);
@@ -941,9 +943,24 @@ export class CallManager {
       }
     }
 
-    await this.speakPcmStream(state, pcm());
+    // Same speaking lifecycle as speak(). Without it state.speaking stays
+    // false for the whole streamed reply, and handleSpokenStop /
+    // handleBargeIn both bail on `!state.speaking` — so "stop" was silently
+    // dropped while the agent talked.
+    state.speaking = true;
+    state.interrupted = false;
+    state.stoppedBySpeech = false;
+    try {
+      await this.speakPcmStream(state, pcm());
+      if (!state.interrupted) await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      state.speaking = false;
+    }
+    console.error(`[${state.callId}] Speaking (stream) ${state.interrupted ? 'interrupted' : 'done'}`);
 
-    if (spoken.length === 0) {
+    // Being stopped before the first sentence is a normal outcome, not an
+    // error — throwing here would propagate out and end the call.
+    if (spoken.length === 0 && !state.interrupted && !state.hungUp) {
       throw new Error('Agent produced no speakable output');
     }
     return spoken.join(' ');
