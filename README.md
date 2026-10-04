@@ -163,6 +163,47 @@ bun run call --message "..." --interactive             # follow-up prompts on st
 Set `CALLME_TRANSCRIPT_TIMEOUT_MS` to bound how long each listen waits for a
 reply (default 180000 ms). Same `CALLME_*` environment variables as above.
 
+### Inbound mode: dial your number and talk to an agent
+
+The reverse direction also works. Instead of the agent calling you, **you
+call your Telnyx number** and get bridged into a voice conversation with
+Claude Code or Codex:
+
+```bash
+cd server
+bun run inbound --backend claude-code
+bun run inbound --backend codex --greeting "Hey! Codex here. What's up?"
+```
+
+How it works: the server answers the incoming call, transcribes what you say,
+sends it to the agent CLI in non-interactive mode (`claude -p` /
+`codex exec`, with the full conversation history in the prompt), and speaks
+the agent's reply back. Say "goodbye" (or just hang up) to end the call.
+
+Setup is the same webhook you already configured for outbound calls — in the
+Telnyx portal, point your number's Voice API application at
+`https://<your-ngrok-url>/twiml`. Then run the command above and dial
+`CALLME_PHONE_NUMBER`.
+
+Options:
+
+```bash
+bun run inbound --backend codex --cwd ~/my-project   # agent's working directory
+bun run inbound --backend claude-code --backend-timeout-ms 180000
+```
+
+Security notes:
+
+- **Inbound requires Telnyx** (`CALLME_PHONE_PROVIDER=telnyx`). Twilio
+  inbound is not implemented yet.
+- **Caller allowlist.** By default only `CALLME_USER_PHONE_NUMBER` (you) can
+  call in — anyone else is hung up immediately. Add numbers with
+  `CALLME_INBOUND_ALLOW_FROM=+15551234567,+15557654321`. Setting it empty
+  allows any caller (not recommended: strangers would get a voice line into
+  your coding agents).
+- Codex runs with a **read-only sandbox**, so approval prompts can't stall a
+  call. Claude Code follows your normal CLI permissions for tool use.
+
 ---
 
 ## How It Works
