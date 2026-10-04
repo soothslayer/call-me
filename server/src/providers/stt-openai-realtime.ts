@@ -65,7 +65,6 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
       this.ws = new WebSocket(url, {
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
-          'OpenAI-Beta': 'realtime=v1',
         },
       });
 
@@ -74,19 +73,25 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
         this.connected = true;
         this.reconnectAttempts = 0;  // Reset on successful connection
 
-        // Configure the transcription session
+        // Configure the transcription session (GA API shape; the beta
+        // `transcription_session.update` shape was shut off by OpenAI)
         this.sendEvent({
-          type: 'transcription_session.update',
+          type: 'session.update',
           session: {
-            input_audio_format: 'g711_ulaw',
-            input_audio_transcription: {
-              model: this.model,
-            },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: this.silenceDurationMs,
+            type: 'transcription',
+            audio: {
+              input: {
+                format: { type: 'audio/pcmu' },
+                transcription: {
+                  model: this.model,
+                },
+                turn_detection: {
+                  type: 'server_vad',
+                  threshold: 0.5,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: this.silenceDurationMs,
+                },
+              },
             },
           },
         });
@@ -159,6 +164,8 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
 
   private handleEvent(event: any): void {
     switch (event.type) {
+      case 'session.created':
+      case 'session.updated':
       case 'transcription_session.created':
       case 'transcription_session.updated':
         console.error(`[RealtimeSTT] ${event.type}`);

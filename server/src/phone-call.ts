@@ -412,7 +412,9 @@ export class CallManager {
           // Route inbound calls to the registered handler (inbound mode).
           // Outbound calls initiated via the API have direction=outgoing.
           const direction = event.data?.payload?.direction;
-          const from = event.data?.payload?.from?.phone_number || 'unknown';
+          // Call Control v2 sends `from` as a plain E.164 string; older payloads nested it
+          const rawFrom = event.data?.payload?.from;
+          const from = (typeof rawFrom === 'string' ? rawFrom : rawFrom?.phone_number) || 'unknown';
           if (direction === 'incoming' && this.onInboundCall) {
             console.error(`Inbound call from ${from} (${callControlId})`);
             this.onInboundCall(callControlId, from).catch((err) =>

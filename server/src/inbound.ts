@@ -53,6 +53,8 @@ Options:
 
 Environment:
   Same CALLME_* variables as the MCP server / CLI (see README), plus:
+  CALLME_CALLER_NAMES         Comma-separated number=name pairs, so each caller
+                              is greeted by name (e.g. +15551234567=Alice).
   CALLME_INBOUND_ALLOW_FROM   Comma-separated E.164 numbers allowed to call in.
                               Defaults to CALLME_USER_PHONE_NUMBER (just you).
 
@@ -133,6 +135,19 @@ function allowedCallers(): string[] | null {
   return mine ? [normalizeNumber(mine)] : [];
 }
 
+/**
+ * Parse CALLME_CALLER_NAMES ("+15551234567=Alice,+15557654321=Bob") into
+ * a digits-only number -> name map, used to greet each caller by name.
+ */
+function callerNames(): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const entry of (process.env.CALLME_CALLER_NAMES || '').split(',')) {
+    const [num, name] = entry.split('=').map((s) => s.trim());
+    if (num && name) names.set(normalizeNumber(num), name);
+  }
+  return names;
+}
+
 const GOODBYE_RE = /^(goodbye|bye( bye)?|hang up|that'?s all|that'?s it|talk (to you )?later)\.?$/i;
 
 async function main(): Promise<void> {
@@ -149,9 +164,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (!args.greeting) {
-    args.greeting = `Hey there! You're talking to ${backendLabel(args.backend)}. What's on your mind?`;
-  }
+  const names = callerNames();
+  const greetingFor = (name: string | undefined) =>
+    args.greeting ||
+    `Hey${name ? ` ${name}` : ''}! You're talking to ${backendLabel(args.backend)}. What's on your mind?`;
 
   const allowList = allowedCallers();
   if (allowList === null) {
@@ -181,8 +197,11 @@ async function main(): Promise<void> {
       return;
     }
 
+    const callerName = names.get(normalizeNumber(from));
+    console.error(`[inbound] Caller: ${callerName ?? 'unnamed'} (${from})`);
+
     await callManager.runInboundConversation(callControlId, from, {
-      greeting: args.greeting,
+      greeting: greetingFor(callerName),
       farewell: args.farewell,
       onUserMessage: async (transcript: string, history: ConversationHistory) => {
         const trimmed = transcript.trim();
@@ -193,6 +212,7 @@ async function main(): Promise<void> {
           return await runAgentTurn(args.backend, history, trimmed, {
             timeoutMs: args.backendTimeoutMs,
             cwd: args.cwd,
+            callerName,
           });
         } catch (error) {
           console.error(`[inbound] Agent turn failed:`, error instanceof Error ? error.message : error);

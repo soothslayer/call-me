@@ -201,6 +201,9 @@ Security notes:
   `CALLME_INBOUND_ALLOW_FROM=+15551234567,+15557654321`. Setting it empty
   allows any caller (not recommended: strangers would get a voice line into
   your coding agents).
+- **Caller names.** Set `CALLME_CALLER_NAMES=+15551234567=Alice,+15557654321=Bob`
+  so the greeting and the agent's prompt use the caller's name. Unnamed
+  callers get a generic greeting.
 - Codex runs with a **read-only sandbox**, so approval prompts can't stall a
   call. Claude Code follows your normal CLI permissions for tool use.
 
