@@ -71,6 +71,36 @@ export interface InboundHooks {
   stoppedNotice?: string;
 }
 
+/**
+ * Build a turn-taking chime as 24 kHz mono 16-bit PCM — the format sendAudio
+ * expects, so it goes through the same resample-and-mu-law path as speech.
+ *
+ * Two notes, ~90ms each. 'yourTurn' rises (go ahead), 'gotIt' falls (heard
+ * you, working). Each note is amplitude-ramped at both ends; a tone that
+ * starts or stops at full amplitude clicks over a phone codec. Kept quiet
+ * relative to speech so they read as punctuation, not interruptions.
+ */
+export function chimePcm(kind: 'yourTurn' | 'gotIt'): Buffer {
+  const SAMPLE_RATE = 24000;
+  const NOTE_MS = 90;
+  const AMPLITUDE = 0.22;           // well under speech level
+  const RAMP = Math.round(SAMPLE_RATE * 0.008);  // 8ms fade in/out
+  const notes = kind === 'yourTurn' ? [660, 988] : [988, 660];
+
+  const perNote = Math.round((SAMPLE_RATE * NOTE_MS) / 1000);
+  const buf = Buffer.alloc(perNote * notes.length * 2);
+  let offset = 0;
+  for (const freq of notes) {
+    for (let i = 0; i < perNote; i++) {
+      const envelope = Math.min(1, i / RAMP, (perNote - 1 - i) / RAMP);
+      const sample = Math.sin((2 * Math.PI * freq * i) / SAMPLE_RATE) * AMPLITUDE * envelope;
+      buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sample * 32767))), offset);
+      offset += 2;
+    }
+  }
+  return buf;
+}
+
 const STOP_RE = /^\W*(please\W+)?(stop|cancel)\b/i;
 const STOPPED = Symbol('stopped');
 
@@ -1069,6 +1099,12 @@ export class CallManager {
       throw new Error('STT session not available');
     }
 
+    // Two tones bracket the caller's turn. Without them the only cue that
+    // the line is listening — or that it decided you had finished — is
+    // silence, which is indistinguishable from the agent thinking or the
+    // call having died. Rising = your turn, falling = got it.
+    await this.playChime(state, 'yourTurn');
+
     // Race between getting a transcript and detecting hangup
     const transcript = await Promise.race([
       state.sttSession.waitForTranscript(this.config.transcriptTimeoutMs),
@@ -1079,8 +1115,25 @@ export class CallManager {
       throw new Error('Call was hung up by user');
     }
 
+    await this.playChime(state, 'gotIt');
+
     console.error(`[${state.callId}] User said: ${transcript}`);
     return transcript;
+  }
+
+  /**
+   * Short tone pair marking the caller's turn. 'yourTurn' rises, 'gotIt'
+   * falls, so they are distinguishable without seeing anything. Disable with
+   * CALLME_CHIMES=false.
+   */
+  private async playChime(state: CallState, kind: 'yourTurn' | 'gotIt'): Promise<void> {
+    if (process.env.CALLME_CHIMES === 'false' || state.hungUp) return;
+    try {
+      await this.sendAudio(state, chimePcm(kind));
+    } catch (error) {
+      // A chime is never worth failing a turn over.
+      console.error(`[${state.callId}] Chime failed:`, error instanceof Error ? error.message : error);
+    }
   }
 
   /**

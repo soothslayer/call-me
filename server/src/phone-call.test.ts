@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { CallManager } from './phone-call.js';
+import { CallManager, chimePcm } from './phone-call.js';
 import { SentenceBuffer } from './backends.js';
 
 function fakeState(): any {
@@ -184,6 +184,40 @@ describe('handleSpokenStop', () => {
       expect(mgr.handleSpokenStop(state, 'Tell me')).toBe(false);
       expect(mgr.handleSpokenStop(state, 'Stop')).toBe(false);
     });
+  });
+});
+
+describe('chimePcm', () => {
+  const samples = (b: Buffer) => {
+    const out: number[] = [];
+    for (let i = 0; i + 1 < b.length; i += 2) out.push(b.readInt16LE(i));
+    return out;
+  };
+
+  test('is two 90ms notes of 24kHz mono 16-bit PCM', () => {
+    // 24000 Hz * 0.09 s * 2 notes * 2 bytes
+    expect(chimePcm('yourTurn').length).toBe(Math.round(24000 * 0.09) * 2 * 2);
+  });
+
+  test('is audible but well below full scale', () => {
+    const peak = Math.max(...samples(chimePcm('yourTurn')).map(Math.abs));
+    expect(peak).toBeGreaterThan(1000);
+    expect(peak).toBeLessThan(32767 * 0.3);
+  });
+
+  test('ramps in and out, so it does not click', () => {
+    const s = samples(chimePcm('gotIt'));
+    expect(Math.abs(s[0])).toBeLessThan(200);
+    expect(Math.abs(s[s.length - 1])).toBeLessThan(200);
+  });
+
+  test('the two chimes are distinguishable', () => {
+    // Same notes in opposite order: rising vs falling.
+    expect(chimePcm('yourTurn').equals(chimePcm('gotIt'))).toBe(false);
+    const half = chimePcm('yourTurn').length / 2;
+    const risingFirst = chimePcm('yourTurn').subarray(0, half);
+    const fallingSecond = chimePcm('gotIt').subarray(half);
+    expect(risingFirst.equals(fallingSecond)).toBe(true);
   });
 });
 

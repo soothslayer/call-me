@@ -222,6 +222,13 @@ Security notes:
   get right. Note the match is a substring of the digits heard, so a long
   spoken digit string effectively gets several guesses per attempt; the
   allowlist is the stronger control of the two.
+- **Turn-taking chimes.** Two short tones bracket each of the caller's
+  turns: rising when the line starts listening, falling once it has decided
+  they finished and is working on it. On a phone the only other cue is
+  silence, which is indistinguishable from the agent thinking or the call
+  having dropped — and it lets you shorten
+  `CALLME_STT_SILENCE_DURATION_MS` without the pauses feeling like dead
+  air. Set `CALLME_CHIMES=false` to turn them off.
 - **Barge-in.** `CALLME_BARGE_IN=true` (the default) lets the caller talk
   over the agent: playback stops and what they say becomes the next turn.
   Set it to `false` if background noise or a speakerphone keeps cutting the

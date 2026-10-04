@@ -338,6 +338,11 @@ async function main(): Promise<void> {
     `Pacing: waits ${Math.round(config.transcriptTimeoutMs / 1000)}s for the caller to speak ` +
       `(CALLME_TRANSCRIPT_TIMEOUT_MS), then the silence above ends their turn`
   );
+  console.error(
+    process.env.CALLME_CHIMES === 'false'
+      ? 'Chimes: off (CALLME_CHIMES=false)'
+      : 'Chimes: on — rising tone when it starts listening, falling tone when it has your turn'
+  );
   const callManager = new CallManager(config);
   const port = await callManager.startServer();
   const publicUrl = await startNgrok(port);
