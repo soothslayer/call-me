@@ -53,6 +53,8 @@ Options:
 
 Environment:
   Same CALLME_* variables as the MCP server / CLI (see README), plus:
+  CALLME_INBOUND_PIN          If set, callers must say this PIN before reaching
+                              the agent (3 tries, then hang up).
   CALLME_CLAUDE_EXTRA_ARGS    Extra flags for the claude CLI, space-separated
                               (e.g. --dangerously-skip-permissions).
   CALLME_CALLER_NAMES         Comma-separated number=name pairs, so each caller
@@ -150,6 +152,28 @@ function callerNames(): Map<string, string> {
   return names;
 }
 
+const DIGIT_WORDS: Record<string, string> = {
+  zero: '0', oh: '0', o: '0', one: '1', two: '2', to: '2', too: '2', three: '3',
+  four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9',
+  ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15',
+  sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20',
+  thirty: '30', forty: '40', fifty: '50', sixty: '60', seventy: '70', eighty: '80', ninety: '90',
+};
+
+/**
+ * Turn a spoken PIN into digits. Handles "1234", "one two three four",
+ * "twelve thirty four" and "12-34"; other words are ignored.
+ */
+function spokenDigits(transcript: string): string {
+  return transcript
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((w) => (/^\d+$/.test(w) ? w : DIGIT_WORDS[w] ?? ''))
+    .join('');
+}
+
+const MAX_PIN_ATTEMPTS = 3;
+
 const GOODBYE_RE = /^(goodbye|bye( bye)?|hang up|that'?s all|that'?s it|talk (to you )?later)\.?$/i;
 
 async function main(): Promise<void> {
@@ -167,9 +191,13 @@ async function main(): Promise<void> {
   }
 
   const names = callerNames();
+  const pin = normalizeNumber(process.env.CALLME_INBOUND_PIN || '');
   const greetingFor = (name: string | undefined) =>
     args.greeting ||
-    `Hey${name ? ` ${name}` : ''}! You're talking to ${backendLabel(args.backend)}. What's on your mind?`;
+    (pin
+      ? `Hi${name ? ` ${name}` : ''}. Please say your PIN.`
+      : `Hey${name ? ` ${name}` : ''}! You're talking to ${backendLabel(args.backend)}. What's on your mind?`);
+  console.error(pin ? 'Inbound PIN: required' : 'Inbound PIN: not set (CALLME_INBOUND_PIN)');
 
   const allowList = allowedCallers();
   if (allowList === null) {
@@ -202,11 +230,32 @@ async function main(): Promise<void> {
     const callerName = names.get(normalizeNumber(from));
     console.error(`[inbound] Caller: ${callerName ?? 'unnamed'} (${from})`);
 
-    await callManager.runInboundConversation(callControlId, from, {
+    let verified = !pin;
+    let pinAttempts = 0;
+
+    const hooks = {
       greeting: greetingFor(callerName),
       farewell: args.farewell,
       onUserMessage: async (transcript: string, history: ConversationHistory) => {
         const trimmed = transcript.trim();
+
+        if (!verified) {
+          // Keep the PIN out of the history that gets sent to the agent
+          history.length = 0;
+          if (spokenDigits(trimmed).includes(pin)) {
+            verified = true;
+            console.error(`[inbound] PIN accepted from ${from}`);
+            return `Thanks. You're talking to ${backendLabel(args.backend)}. What's on your mind?`;
+          }
+          pinAttempts++;
+          console.error(`[inbound] Wrong PIN from ${from} (attempt ${pinAttempts}/${MAX_PIN_ATTEMPTS})`);
+          if (pinAttempts >= MAX_PIN_ATTEMPTS) {
+            hooks.farewell = "Sorry, that's not right. Goodbye.";
+            return null;
+          }
+          return "Sorry, that's not right. Please say your PIN again.";
+        }
+
         if (GOODBYE_RE.test(trimmed)) {
           return null; // triggers farewell + hangup
         }
@@ -221,7 +270,9 @@ async function main(): Promise<void> {
           return "Sorry, I hit a snag on that one. What else is on your mind?";
         }
       },
-    });
+    };
+
+    await callManager.runInboundConversation(callControlId, from, hooks);
   };
 
   const shutdown = async () => {

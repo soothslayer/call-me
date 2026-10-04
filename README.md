@@ -201,6 +201,10 @@ Security notes:
   `CALLME_INBOUND_ALLOW_FROM=+15551234567,+15557654321`. Setting it empty
   allows any caller (not recommended: strangers would get a voice line into
   your coding agents).
+- **Spoken PIN.** Set `CALLME_INBOUND_PIN=<digits>` and callers must say it
+  before reaching the agent ("one two three four" or "twelve thirty four" both
+  work). Three wrong tries and the call hangs up. The PIN is kept out of the
+  conversation sent to the agent.
 - **Caller names.** Set `CALLME_CALLER_NAMES=+15551234567=Alice,+15557654321=Bob`
   so the greeting and the agent's prompt use the caller's name. Unnamed
   callers get a generic greeting.
