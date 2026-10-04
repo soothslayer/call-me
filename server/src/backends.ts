@@ -48,7 +48,7 @@ export function buildAgentPrompt(
     `You are ${backendLabel(backend)}, speaking with ${caller} on a phone call.`,
     'Keep every reply SHORT and conversational — it will be read aloud by text-to-speech.',
     'No markdown formatting, no code blocks, no bullet lists, no headers. Plain spoken sentences only.',
-    'If they ask you to do something on his computer, say what you would do in one or two short sentences rather than pasting commands or code.',
+    'If they ask you to do something on the computer, do it if your tools allow, then say in one or two short sentences what you did. Never read commands or code aloud.',
     '',
     'Conversation so far:',
   ];
@@ -78,7 +78,9 @@ export async function runAgentTurn(
 
   let stdout: string;
   if (backend === 'claude-code') {
-    stdout = await runSubprocess('claude', ['-p', prompt], { timeoutMs, cwd });
+    // Extra CLI flags, e.g. CALLME_CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
+    const extraArgs = (process.env.CALLME_CLAUDE_EXTRA_ARGS || '').split(/\s+/).filter(Boolean);
+    stdout = await runSubprocess('claude', [...extraArgs, '-p', prompt], { timeoutMs, cwd });
   } else {
     // -o writes only the final agent message to a file (keeps the live
     // action log on stderr out of the reply). read-only sandbox avoids

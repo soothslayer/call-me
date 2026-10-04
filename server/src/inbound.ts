@@ -53,6 +53,8 @@ Options:
 
 Environment:
   Same CALLME_* variables as the MCP server / CLI (see README), plus:
+  CALLME_CLAUDE_EXTRA_ARGS    Extra flags for the claude CLI, space-separated
+                              (e.g. --dangerously-skip-permissions).
   CALLME_CALLER_NAMES         Comma-separated number=name pairs, so each caller
                               is greeted by name (e.g. +15551234567=Alice).
   CALLME_INBOUND_ALLOW_FROM   Comma-separated E.164 numbers allowed to call in.

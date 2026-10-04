@@ -206,6 +206,9 @@ Security notes:
   callers get a generic greeting.
 - Codex runs with a **read-only sandbox**, so approval prompts can't stall a
   call. Claude Code follows your normal CLI permissions for tool use.
+  To let it act without approval prompts, set
+  `CALLME_CLAUDE_EXTRA_ARGS=--dangerously-skip-permissions` (it can then run
+  any command, so keep the caller allowlist tight).
 
 ---
 
