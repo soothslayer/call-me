@@ -39,6 +39,24 @@ export interface ServerConfig {
   transcriptTimeoutMs: number;
 }
 
+/**
+ * Hooks for an inbound call conversation. Provided by the inbound entrypoint.
+ */
+export interface InboundHooks {
+  /** Spoken once, right after the call is answered. */
+  greeting: string;
+  /** Spoken just before hanging up (skipped if the caller already hung up). */
+  farewell: string;
+  /**
+   * Turn a caller utterance into the agent's spoken reply.
+   * Return null to end the call (farewell is spoken, then hangup).
+   */
+  onUserMessage: (
+    transcript: string,
+    history: Array<{ speaker: 'user' | 'agent'; message: string }>
+  ) => Promise<string | null>;
+}
+
 export function loadServerConfig(publicUrl: string): ServerConfig {
   const providerConfig = loadProviderConfig();
   const errors = validateProviderConfig(providerConfig);
@@ -75,6 +93,14 @@ export class CallManager {
   private wss: WebSocketServer | null = null;
   private config: ServerConfig;
   private currentCallId = 0;
+
+  /**
+   * Optional handler for inbound calls. When set (inbound mode), Telnyx
+   * `call.initiated` webhooks with direction=incoming are routed here.
+   * The handler is responsible for running the conversation via
+   * runInboundConversation(). Outbound MCP flows are unaffected.
+   */
+  public onInboundCall: ((callControlId: string, from: string) => Promise<void>) | null = null;
 
   constructor(config: ServerConfig) {
     this.config = config;
@@ -382,8 +408,19 @@ export class CallManager {
 
     try {
       switch (eventType) {
-        case 'call.initiated':
+        case 'call.initiated': {
+          // Route inbound calls to the registered handler (inbound mode).
+          // Outbound calls initiated via the API have direction=outgoing.
+          const direction = event.data?.payload?.direction;
+          const from = event.data?.payload?.from?.phone_number || 'unknown';
+          if (direction === 'incoming' && this.onInboundCall) {
+            console.error(`Inbound call from ${from} (${callControlId})`);
+            this.onInboundCall(callControlId, from).catch((err) =>
+              console.error('[inbound] handler error:', err instanceof Error ? err.message : err)
+            );
+          }
           break;
+        }
 
         case 'call.answered':
           // Include security token in the stream URL
@@ -529,9 +566,25 @@ export class CallManager {
       await this.config.providers.phone.hangup(state.callControlId);
     }
 
-    // Close sessions and clean up mappings
-    state.sttSession?.close();
-    state.ws?.close();
+    this.cleanupCallState(state);
+
+    const durationSeconds = Math.round((Date.now() - state.startTime) / 1000);
+    this.activeCalls.delete(state.callId);
+
+    return { durationSeconds };
+  }
+
+  /**
+   * Release all resources held by a call: STT session, media WebSocket,
+   * and the security-token / call-control-ID mappings. Idempotent.
+   */
+  private cleanupCallState(state: CallState): void {
+    try {
+      state.sttSession?.close();
+    } catch { /* already closed */ }
+    try {
+      state.ws?.close();
+    } catch { /* already closed */ }
     state.hungUp = true;
 
     // Clean up security token mapping
@@ -539,11 +592,91 @@ export class CallManager {
     if (state.callControlId) {
       this.callControlIdToCallId.delete(state.callControlId);
     }
+    this.activeCalls.delete(state.callId);
+  }
 
-    const durationSeconds = Math.round((Date.now() - state.startTime) / 1000);
-    this.activeCalls.delete(callId);
+  /**
+   * Run a full inbound call conversation: answer the call, wait for the
+   * media stream, then loop listen -> onUserMessage -> speak until the
+   * hook returns null or the caller hangs up.
+   *
+   * The Telnyx `call.answered` webhook (fired after answerCall) triggers the
+   * existing startStreaming flow, so no special webhook handling is needed
+   * beyond the mapping registered here.
+   */
+  async runInboundConversation(
+    callControlId: string,
+    from: string,
+    hooks: InboundHooks
+  ): Promise<void> {
+    const callId = `inbound-${++this.currentCallId}-${Date.now()}`;
 
-    return { durationSeconds };
+    const sttSession = this.config.providers.stt.createSession();
+    await sttSession.connect();
+
+    const wsToken = generateWebSocketToken();
+    const state: CallState = {
+      callId,
+      callControlId,
+      userPhoneNumber: from,
+      ws: null,
+      streamSid: null,
+      streamingReady: false,
+      wsToken,
+      conversationHistory: [],
+      startTime: Date.now(),
+      hungUp: false,
+      sttSession,
+    };
+    this.activeCalls.set(callId, state);
+    this.callControlIdToCallId.set(callControlId, callId);
+    this.wsTokenToCallId.set(wsToken, callId);
+
+    console.error(`[${callId}] Inbound call from ${from}, answering...`);
+
+    const history: Array<{ speaker: 'user' | 'agent'; message: string }> = [];
+
+    try {
+      await this.config.providers.phone.answerCall(callControlId);
+      await this.waitForConnection(callId, 20000);
+
+      await this.speak(state, hooks.greeting);
+      history.push({ speaker: 'agent', message: hooks.greeting });
+
+      for (;;) {
+        let transcript: string;
+        try {
+          transcript = await this.listen(state);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes('hung up')) break;
+          throw error;
+        }
+
+        history.push({ speaker: 'user', message: transcript });
+
+        const reply = await hooks.onUserMessage(transcript, history);
+        if (reply === null || state.hungUp) break;
+
+        history.push({ speaker: 'agent', message: reply });
+        await this.speak(state, reply);
+      }
+    } catch (error) {
+      console.error(`[${callId}] Inbound call error:`, error instanceof Error ? error.message : error);
+    } finally {
+      if (!state.hungUp) {
+        try {
+          await this.endCall(callId, hooks.farewell);
+        } catch {
+          try {
+            await this.config.providers.phone.hangup(callControlId);
+          } catch { /* best effort */ }
+          this.cleanupCallState(state);
+        }
+      } else {
+        this.cleanupCallState(state);
+      }
+      console.error(`[${callId}] Inbound call finished`);
+    }
   }
 
   private async waitForConnection(callId: string, timeout: number): Promise<void> {
