@@ -27,6 +27,8 @@ export interface AgentTurnOptions {
   cwd?: string;
   /** Max characters of the agent's reply to speak (default: 1200). */
   maxReplyChars?: number;
+  /** Caller's name for the prompt (default: "the caller"). */
+  callerName?: string;
 }
 
 export type ConversationHistory = Array<{ speaker: 'user' | 'agent'; message: string }>;
@@ -38,21 +40,23 @@ export type ConversationHistory = Array<{ speaker: 'user' | 'agent'; message: st
 export function buildAgentPrompt(
   backend: AgentBackend,
   history: ConversationHistory,
-  userMessage: string
+  userMessage: string,
+  callerName: string = 'the caller'
 ): string {
+  const caller = callerName;
   const lines = [
-    `You are ${backendLabel(backend)}, speaking with Hanlon on a phone call.`,
+    `You are ${backendLabel(backend)}, speaking with ${caller} on a phone call.`,
     'Keep every reply SHORT and conversational — it will be read aloud by text-to-speech.',
     'No markdown formatting, no code blocks, no bullet lists, no headers. Plain spoken sentences only.',
-    'If he asks you to do something on his computer, say what you would do in one or two short sentences rather than pasting commands or code.',
+    'If they ask you to do something on his computer, say what you would do in one or two short sentences rather than pasting commands or code.',
     '',
     'Conversation so far:',
   ];
   for (const turn of history) {
-    const who = turn.speaker === 'user' ? 'Hanlon' : 'You';
+    const who = turn.speaker === 'user' ? caller : 'You';
     lines.push(`${who}: ${turn.message}`);
   }
-  lines.push(`Hanlon: ${userMessage}`);
+  lines.push(`${caller}: ${userMessage}`);
   lines.push('You:');
   return lines.join('\n');
 }
@@ -70,7 +74,7 @@ export async function runAgentTurn(
   const timeoutMs = options.timeoutMs ?? 120000;
   const maxReplyChars = options.maxReplyChars ?? 1200;
   const cwd = options.cwd ?? process.cwd();
-  const prompt = buildAgentPrompt(backend, history, userMessage);
+  const prompt = buildAgentPrompt(backend, history, userMessage, options.callerName);
 
   let stdout: string;
   if (backend === 'claude-code') {
