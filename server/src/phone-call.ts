@@ -29,6 +29,7 @@ interface CallState {
   sttSession: RealtimeSTTSession | null;
   speaking: boolean;  // True while agent audio is being sent
   interrupted: boolean;  // Set when the caller talks over the agent (barge-in)
+  stoppedBySpeech: boolean;  // Set when the caller said "stop" mid-sentence
 }
 
 export interface ServerConfig {
@@ -55,9 +56,21 @@ export interface InboundHooks {
    */
   onUserMessage: (
     transcript: string,
-    history: Array<{ speaker: 'user' | 'agent'; message: string }>
+    history: Array<{ speaker: 'user' | 'agent'; message: string }>,
+    signal: AbortSignal
   ) => Promise<string | null>;
+  /**
+   * Spoken if the caller talks while the agent is still thinking, e.g.
+   * "Claude Code is thinking. Say stop to interrupt." Saying "stop" then
+   * aborts the turn. Leave unset to just queue that speech as the next turn.
+   */
+  thinkingNotice?: string;
+  /** Spoken after the caller stops the agent (default: "Listening."). */
+  stoppedNotice?: string;
 }
+
+const STOP_RE = /^\W*(please\W+)?(stop|cancel)\b/i;
+const STOPPED = Symbol('stopped');
 
 export function loadServerConfig(publicUrl: string): ServerConfig {
   const providerConfig = loadProviderConfig();
@@ -501,10 +514,12 @@ export class CallManager {
       sttSession,
       speaking: false,
       interrupted: false,
+      stoppedBySpeech: false,
     };
 
     this.activeCalls.set(callId, state);
     sttSession.onSpeechStart?.(() => this.handleBargeIn(state));
+    sttSession.onUnclaimedTranscript?.((text) => this.handleSpokenStop(state, text));
 
     try {
       const callControlId = await this.config.providers.phone.initiateCall(
@@ -636,9 +651,11 @@ export class CallManager {
       sttSession,
       speaking: false,
       interrupted: false,
+      stoppedBySpeech: false,
     };
     this.activeCalls.set(callId, state);
     sttSession.onSpeechStart?.(() => this.handleBargeIn(state));
+    sttSession.onUnclaimedTranscript?.((text) => this.handleSpokenStop(state, text));
     this.callControlIdToCallId.set(callControlId, callId);
     this.wsTokenToCallId.set(wsToken, callId);
 
@@ -662,15 +679,34 @@ export class CallManager {
           throw error;
         }
 
+        // A bare "stop" (e.g. said after a barge-in cut the agent off) is not a request
+        if (STOP_RE.test(transcript)) {
+          await this.speak(state, hooks.stoppedNotice ?? 'Listening.');
+          continue;
+        }
+
         history.push({ speaker: 'user', message: transcript });
 
-        const reply = await hooks.onUserMessage(transcript, history);
-        if (reply === null || state.hungUp) break;
+        const abort = new AbortController();
+        const replyPromise = hooks.onUserMessage(transcript, history, abort.signal);
+        const reply = hooks.thinkingNotice
+          ? await this.awaitReplyWhileListening(state, replyPromise, abort, hooks.thinkingNotice)
+          : await replyPromise;
+        if (state.hungUp) break;
+        if (reply === STOPPED) {
+          history.push({ speaker: 'agent', message: '[stopped by the caller before answering]' });
+          await this.speak(state, hooks.stoppedNotice ?? 'Listening.');
+          continue;
+        }
+        if (reply === null) break;
 
         history.push({ speaker: 'agent', message: reply });
         await this.speak(state, reply);
         if (state.interrupted) {
           history[history.length - 1].message += ' [cut off: the caller interrupted]';
+        }
+        if (state.stoppedBySpeech) {
+          await this.speak(state, hooks.stoppedNotice ?? 'Listening.');
         }
       }
     } catch (error) {
@@ -739,14 +775,73 @@ export class CallManager {
   }
 
   /**
+   * Wait for the agent's reply while still listening to the caller. If they
+   * say "stop", abort the turn and return STOPPED; anything else gets the
+   * thinking notice and is discarded.
+   */
+  private async awaitReplyWhileListening(
+    state: CallState,
+    replyPromise: Promise<string | null>,
+    abort: AbortController,
+    thinkingNotice: string
+  ): Promise<string | null | typeof STOPPED> {
+    const stt = state.sttSession!;
+    const reply = replyPromise.then((value) => ({ kind: 'reply' as const, value }));
+    for (;;) {
+      const speech = stt.waitForTranscript(this.config.transcriptTimeoutMs).then(
+        (text) => ({ kind: 'speech' as const, text }),
+        () => ({ kind: 'timeout' as const })
+      );
+      const first = await Promise.race([reply, speech, this.waitForHangup(state).catch(() => ({ kind: 'hangup' as const }))]);
+
+      if (first.kind === 'reply') {
+        stt.cancelWait?.();
+        return first.value;
+      }
+      if (first.kind === 'hangup') {
+        stt.cancelWait?.();
+        abort.abort();
+        await replyPromise.catch(() => {});
+        return null;
+      }
+      if (first.kind === 'speech') {
+        console.error(`[${state.callId}] Caller spoke while agent was thinking: ${first.text}`);
+        if (STOP_RE.test(first.text)) {
+          abort.abort();
+          await replyPromise.catch(() => {});
+          return STOPPED;
+        }
+        await this.speak(state, thinkingNotice);
+      }
+    }
+  }
+
+  /**
    * Barge-in: the caller started talking while the agent was speaking.
    * Stop sending audio and tell the provider to drop what it has buffered.
    * What the caller says is queued by the STT session as the next turn.
    */
   private handleBargeIn(state: CallState): void {
     if (!state.speaking || state.interrupted || process.env.CALLME_BARGE_IN === 'false') return;
-    state.interrupted = true;
     console.error(`[${state.callId}] Barge-in: caller interrupted, stopping playback`);
+    this.stopPlayback(state);
+  }
+
+  /**
+   * The caller said "stop" while the agent was talking: cut playback off.
+   * Returns true to consume the transcript so it isn't treated as a turn.
+   */
+  private handleSpokenStop(state: CallState, text: string): boolean {
+    if (!state.speaking || !STOP_RE.test(text)) return false;
+    console.error(`[${state.callId}] Caller said "${text}" while agent was talking, stopping playback`);
+    this.stopPlayback(state);
+    state.stoppedBySpeech = true;
+    return true;
+  }
+
+  private stopPlayback(state: CallState): void {
+    if (state.interrupted) return;
+    state.interrupted = true;
     if (state.ws?.readyState === WebSocket.OPEN) {
       const clear: Record<string, unknown> = { event: 'clear' };
       if (state.streamSid) clear.streamSid = state.streamSid;
@@ -784,6 +879,7 @@ export class CallManager {
 
     state.speaking = true;
     state.interrupted = false;
+    state.stoppedBySpeech = false;
     try {
       // Use streaming if available for lower latency
       if (tts.synthesizeStream) {

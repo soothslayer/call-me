@@ -29,6 +29,8 @@ export interface AgentTurnOptions {
   maxReplyChars?: number;
   /** Caller's name for the prompt (default: "the caller"). */
   callerName?: string;
+  /** Aborting kills the agent subprocess (caller said "stop"). */
+  signal?: AbortSignal;
 }
 
 export type ConversationHistory = Array<{ speaker: 'user' | 'agent'; message: string }>;
@@ -80,7 +82,7 @@ export async function runAgentTurn(
   if (backend === 'claude-code') {
     // Extra CLI flags, e.g. CALLME_CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
     const extraArgs = (process.env.CALLME_CLAUDE_EXTRA_ARGS || '').split(/\s+/).filter(Boolean);
-    stdout = await runSubprocess('claude', [...extraArgs, '-p', prompt], { timeoutMs, cwd });
+    stdout = await runSubprocess('claude', [...extraArgs, '-p', prompt], { timeoutMs, cwd, signal: options.signal });
   } else {
     // -o writes only the final agent message to a file (keeps the live
     // action log on stderr out of the reply). read-only sandbox avoids
@@ -91,7 +93,7 @@ export async function runAgentTurn(
       await runSubprocess(
         'codex',
         ['exec', '-o', outFile, '--skip-git-repo-check', '-s', 'read-only', '--color', 'never', prompt],
-        { timeoutMs, cwd }
+        { timeoutMs, cwd, signal: options.signal }
       );
       stdout = await Bun.file(outFile).text();
     } finally {
@@ -127,6 +129,7 @@ export function cleanSpokenReply(raw: string, maxChars: number): string {
 interface SubprocessOptions {
   timeoutMs: number;
   cwd: string;
+  signal?: AbortSignal;
 }
 
 async function runSubprocess(
@@ -156,11 +159,19 @@ async function runSubprocess(
     proc.kill('SIGKILL');
   }, options.timeoutMs);
 
+  const onAbort = () => {
+    console.error(`[backend] ${command} stopped by caller, killing`);
+    proc.kill('SIGTERM');
+  };
+  if (options.signal?.aborted) onAbort();
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+
   let exitCode: number;
   try {
     exitCode = await proc.exited;
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', onAbort);
   }
   await Promise.all([stdoutReader, stderrReader]);
 

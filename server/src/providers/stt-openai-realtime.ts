@@ -42,9 +42,11 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
   private onTranscriptCallback: ((transcript: string) => void) | null = null;
   private onPartialCallback: ((partial: string) => void) | null = null;
   private onSpeechStartCallback: (() => void) | null = null;
+  private onUnclaimedCallback: ((transcript: string) => boolean) | null = null;
   // Transcripts that finished while nobody was waiting (caller spoke while the
   // agent was talking or thinking). Handed to the next waitForTranscript.
   private queuedTranscripts: string[] = [];
+  private waitTimeout: ReturnType<typeof setTimeout> | null = null;
   private closed = false;  // True when intentionally closed
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
@@ -187,7 +189,7 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
         if (event.transcript) {
           if (this.onTranscriptCallback) {
             this.onTranscriptCallback(event.transcript);
-          } else {
+          } else if (!this.onUnclaimedCallback?.(event.transcript)) {
             this.queuedTranscripts.push(event.transcript);
           }
         }
@@ -236,21 +238,34 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
     this.onSpeechStartCallback = callback;
   }
 
+  onUnclaimedTranscript(callback: (transcript: string) => boolean): void {
+    this.onUnclaimedCallback = callback;
+  }
+
   async waitForTranscript(timeoutMs: number = 30000): Promise<string> {
     const queued = this.queuedTranscripts.shift();
     if (queued !== undefined) return queued;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.onTranscriptCallback = null;
+        this.waitTimeout = null;
         reject(new Error('Transcript timeout'));
       }, timeoutMs);
+      this.waitTimeout = timeout;
 
       this.onTranscriptCallback = (transcript) => {
         clearTimeout(timeout);
+        this.waitTimeout = null;
         this.onTranscriptCallback = null;
         resolve(transcript);
       };
     });
+  }
+
+  cancelWait(): void {
+    if (this.waitTimeout) clearTimeout(this.waitTimeout);
+    this.waitTimeout = null;
+    this.onTranscriptCallback = null;
   }
 
   close(): void {

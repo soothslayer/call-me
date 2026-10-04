@@ -209,6 +209,11 @@ Security notes:
   over the agent: playback stops and what they say becomes the next turn.
   Set it to `false` if background noise or a speakerphone keeps cutting the
   agent off.
+- **Say "stop".** While the agent is thinking, speaking gets "Claude Code is
+  thinking. Say stop to interrupt." Saying "stop" (or "cancel") then kills
+  the agent's turn. Saying it while the agent is talking cuts the speech off.
+  Either way the call answers "Listening." and waits for the next request.
+  This works whether barge-in is on or off.
 - **Caller names.** Set `CALLME_CALLER_NAMES=+15551234567=Alice,+15557654321=Bob`
   so the greeting and the agent's prompt use the caller's name. Unnamed
   callers get a generic greeting.

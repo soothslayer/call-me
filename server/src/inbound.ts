@@ -238,7 +238,9 @@ async function main(): Promise<void> {
     const hooks = {
       greeting: greetingFor(callerName),
       farewell: args.farewell,
-      onUserMessage: async (transcript: string, history: ConversationHistory) => {
+      thinkingNotice: `${backendLabel(args.backend)} is thinking. Say stop to interrupt.`,
+      stoppedNotice: 'Listening.',
+      onUserMessage: async (transcript: string, history: ConversationHistory, signal: AbortSignal) => {
         const trimmed = transcript.trim();
 
         if (!verified) {
@@ -266,8 +268,10 @@ async function main(): Promise<void> {
             timeoutMs: args.backendTimeoutMs,
             cwd: args.cwd,
             callerName,
+            signal,
           });
         } catch (error) {
+          if (signal.aborted) return '';  // caller said stop; the call manager handles it
           console.error(`[inbound] Agent turn failed:`, error instanceof Error ? error.message : error);
           return "Sorry, I hit a snag on that one. What else is on your mind?";
         }

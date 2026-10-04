@@ -99,6 +99,19 @@ export interface RealtimeSTTSession {
   onSpeechStart?(callback: () => void): void;
 
   /**
+   * Set callback for transcripts that finish while nobody is waiting (e.g.
+   * the caller spoke while the agent was talking). Return true to consume
+   * the transcript; otherwise it is queued for the next waitForTranscript.
+   */
+  onUnclaimedTranscript?(callback: (transcript: string) => boolean): void;
+
+  /**
+   * Abandon a pending waitForTranscript, so later transcripts are queued
+   * for the next wait instead of going to a caller that stopped listening
+   */
+  cancelWait?(): void;
+
+  /**
    * Close the session
    */
   close(): void;
