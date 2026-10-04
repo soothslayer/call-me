@@ -80,10 +80,25 @@ export interface InboundHooks {
  * starts or stops at full amplitude clicks over a phone codec. Kept quiet
  * relative to speech so they read as punctuation, not interruptions.
  */
-export function chimePcm(kind: 'yourTurn' | 'gotIt'): Buffer {
+export const CHIME_VOLUME_DEFAULT = 0.1;
+
+/**
+ * Chime level, 0..1 of full scale, from CALLME_CHIME_VOLUME. Values outside
+ * the range are clamped and anything unparseable falls back to the default,
+ * so a typo quietens or loudens the chime rather than producing silence or
+ * a blast of clipping.
+ */
+export function chimeVolume(): number {
+  const raw = process.env.CALLME_CHIME_VOLUME;
+  if (raw === undefined || raw.trim() === '') return CHIME_VOLUME_DEFAULT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return CHIME_VOLUME_DEFAULT;
+  return Math.max(0, Math.min(1, parsed));
+}
+
+export function chimePcm(kind: 'yourTurn' | 'gotIt', volume: number = chimeVolume()): Buffer {
   const SAMPLE_RATE = 24000;
   const NOTE_MS = 90;
-  const AMPLITUDE = 0.22;           // well under speech level
   const RAMP = Math.round(SAMPLE_RATE * 0.008);  // 8ms fade in/out
   const notes = kind === 'yourTurn' ? [660, 988] : [988, 660];
 
@@ -93,7 +108,7 @@ export function chimePcm(kind: 'yourTurn' | 'gotIt'): Buffer {
   for (const freq of notes) {
     for (let i = 0; i < perNote; i++) {
       const envelope = Math.min(1, i / RAMP, (perNote - 1 - i) / RAMP);
-      const sample = Math.sin((2 * Math.PI * freq * i) / SAMPLE_RATE) * AMPLITUDE * envelope;
+      const sample = Math.sin((2 * Math.PI * freq * i) / SAMPLE_RATE) * volume * envelope;
       buf.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sample * 32767))), offset);
       offset += 2;
     }

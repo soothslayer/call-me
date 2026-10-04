@@ -16,7 +16,7 @@
  * CALLME_INBOUND_ALLOW_FROM to empty to allow any caller (not recommended).
  */
 
-import { CallManager, loadServerConfig } from './phone-call.js';
+import { CallManager, chimeVolume, loadServerConfig } from './phone-call.js';
 import { startNgrok, stopNgrok } from './ngrok.js';
 import {
   AGENT_BACKENDS,
@@ -341,7 +341,8 @@ async function main(): Promise<void> {
   console.error(
     process.env.CALLME_CHIMES === 'false'
       ? 'Chimes: off (CALLME_CHIMES=false)'
-      : 'Chimes: on — rising tone when it starts listening, falling tone when it has your turn'
+      : `Chimes: on at volume ${chimeVolume()} (CALLME_CHIME_VOLUME, 0-1) — rising tone when it ` +
+        `starts listening, falling tone when it has your turn`
   );
   const callManager = new CallManager(config);
   const port = await callManager.startServer();

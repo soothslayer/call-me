@@ -228,7 +228,11 @@ Security notes:
   silence, which is indistinguishable from the agent thinking or the call
   having dropped — and it lets you shorten
   `CALLME_STT_SILENCE_DURATION_MS` without the pauses feeling like dead
-  air. Set `CALLME_CHIMES=false` to turn them off.
+  air. `CALLME_CHIMES=false` turns them off; `CALLME_CHIME_VOLUME` sets the
+  level from 0 to 1 (default `0.1`). Out-of-range or unparseable values are
+  clamped or fall back to the default, so a typo can't blast the caller or
+  silently kill the cue. How loud they land depends on the handset, so
+  expect to tune this once.
 - **Barge-in.** `CALLME_BARGE_IN=true` (the default) lets the caller talk
   over the agent: playback stops and what they say becomes the next turn.
   Set it to `false` if background noise or a speakerphone keeps cutting the

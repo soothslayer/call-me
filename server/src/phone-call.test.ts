@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { CallManager, chimePcm } from './phone-call.js';
+import { CallManager, CHIME_VOLUME_DEFAULT, chimePcm, chimeVolume } from './phone-call.js';
 import { SentenceBuffer } from './backends.js';
 
 function fakeState(): any {
@@ -202,13 +202,51 @@ describe('chimePcm', () => {
   test('is audible but well below full scale', () => {
     const peak = Math.max(...samples(chimePcm('yourTurn')).map(Math.abs));
     expect(peak).toBeGreaterThan(1000);
-    expect(peak).toBeLessThan(32767 * 0.3);
+    expect(peak).toBeLessThan(32767 * 0.15);
+  });
+
+  test('volume scales the waveform', () => {
+    const quiet = Math.max(...samples(chimePcm('yourTurn', 0.05)).map(Math.abs));
+    const loud = Math.max(...samples(chimePcm('yourTurn', 0.2)).map(Math.abs));
+    expect(loud).toBeGreaterThan(quiet * 3);
+  });
+
+  test('volume 0 is silent, so turning it all the way down works', () => {
+    expect(samples(chimePcm('yourTurn', 0)).every((s) => s === 0)).toBe(true);
   });
 
   test('ramps in and out, so it does not click', () => {
     const s = samples(chimePcm('gotIt'));
     expect(Math.abs(s[0])).toBeLessThan(200);
     expect(Math.abs(s[s.length - 1])).toBeLessThan(200);
+  });
+
+  test('CALLME_CHIME_VOLUME is read, clamped, and falls back on nonsense', () => {
+    const prev = process.env.CALLME_CHIME_VOLUME;
+    const set = (v: string | undefined) => {
+      if (v === undefined) delete process.env.CALLME_CHIME_VOLUME;
+      else process.env.CALLME_CHIME_VOLUME = v;
+    };
+    try {
+      set(undefined);
+      expect(chimeVolume()).toBe(CHIME_VOLUME_DEFAULT);
+      set('');
+      expect(chimeVolume()).toBe(CHIME_VOLUME_DEFAULT);
+      set('0.04');
+      expect(chimeVolume()).toBe(0.04);
+      set('0');
+      expect(chimeVolume()).toBe(0);
+      // Clamped rather than clipping the caller's ear off.
+      set('5');
+      expect(chimeVolume()).toBe(1);
+      set('-1');
+      expect(chimeVolume()).toBe(0);
+      // A typo should not silence the chime.
+      set('loud');
+      expect(chimeVolume()).toBe(CHIME_VOLUME_DEFAULT);
+    } finally {
+      set(prev);
+    }
   });
 
   test('the two chimes are distinguishable', () => {
