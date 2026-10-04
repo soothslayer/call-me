@@ -314,9 +314,20 @@ async function main(): Promise<void> {
 
   const allowList = allowedCallers();
   if (allowList === null) {
-    console.error('Warning: CALLME_INBOUND_ALLOW_FROM is empty — ANY caller can talk to your agent.');
+    // null means "allow everyone". With no PIN either, the number is wide
+    // open to anyone who dials it, and the agent runs shell commands. Fail
+    // closed rather than start in that state.
+    if (!pin) {
+      console.error(
+        'Refusing to start: CALLME_INBOUND_ALLOW_FROM is empty (allow everyone) and no\n' +
+          'CALLME_INBOUND_PIN is set, so any caller could reach the agent. Set one of them.'
+      );
+      process.exit(1);
+    }
+    console.error('Warning: CALLME_INBOUND_ALLOW_FROM is empty — any caller who knows the PIN can reach your agent.');
   } else {
     console.error(`Inbound allowlist: ${allowList.join(', ') || '(none — all calls will be rejected)'}`);
+    console.error(pin ? 'Caller check: allowlist + spoken PIN' : 'Caller check: allowlist only (no PIN)');
   }
 
   // Same startup path as the CLI: config, HTTP server, ngrok tunnel.

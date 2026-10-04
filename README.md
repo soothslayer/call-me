@@ -210,11 +210,18 @@ Security notes:
   call in — anyone else is hung up immediately. Add numbers with
   `CALLME_INBOUND_ALLOW_FROM=+15551234567,+15557654321`. Setting it empty
   allows any caller (not recommended: strangers would get a voice line into
-  your coding agents).
-- **Spoken PIN.** Set `CALLME_INBOUND_PIN=<digits>` and callers must say it
-  before reaching the agent ("one two three four" or "twelve thirty four" both
-  work). Three wrong tries and the call hangs up. The PIN is kept out of the
-  conversation sent to the agent.
+  your coding agents) — and if there's no PIN either, inbound **refuses to
+  start** rather than open the line to anyone who dials.
+- **Spoken PIN (optional).** Set `CALLME_INBOUND_PIN=<digits>` and callers
+  must say it before reaching the agent ("one two three four" or "twelve
+  thirty four" both work). Three wrong tries and the call hangs up. The PIN
+  is kept out of the conversation sent to the agent. Leave it empty to rely
+  on the allowlist alone, which is reasonable when the people who call are
+  the only ones on it — one less thing to get wrong over a phone codec,
+  where a single spoken number is the hardest thing for a transcriber to
+  get right. Note the match is a substring of the digits heard, so a long
+  spoken digit string effectively gets several guesses per attempt; the
+  allowlist is the stronger control of the two.
 - **Barge-in.** `CALLME_BARGE_IN=true` (the default) lets the caller talk
   over the agent: playback stops and what they say becomes the next turn.
   Set it to `false` if background noise or a speakerphone keeps cutting the
