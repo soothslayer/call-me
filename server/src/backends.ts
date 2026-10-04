@@ -8,16 +8,18 @@
 
 import { unlink } from 'node:fs/promises';
 
-export type AgentBackend = 'claude-code' | 'codex';
+export type AgentBackend = 'claude-code' | 'codex' | 'hermes';
 
-export const AGENT_BACKENDS: AgentBackend[] = ['claude-code', 'codex'];
+export const AGENT_BACKENDS: AgentBackend[] = ['claude-code', 'codex', 'hermes'];
 
 export function isAgentBackend(value: string): value is AgentBackend {
   return (AGENT_BACKENDS as string[]).includes(value);
 }
 
 export function backendLabel(backend: AgentBackend): string {
-  return backend === 'claude-code' ? 'Claude Code' : 'Codex';
+  if (backend === 'claude-code') return 'Claude Code';
+  if (backend === 'hermes') return 'Hermes';
+  return 'Codex';
 }
 
 export interface AgentTurnOptions {
@@ -83,6 +85,11 @@ export async function runAgentTurn(
     // Extra CLI flags, e.g. CALLME_CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions"
     const extraArgs = (process.env.CALLME_CLAUDE_EXTRA_ARGS || '').split(/\s+/).filter(Boolean);
     stdout = await runSubprocess('claude', [...extraArgs, '-p', prompt], { timeoutMs, cwd, signal: options.signal });
+  } else if (backend === 'hermes') {
+    // One-shot mode prints only the final reply. Extra flags, e.g.
+    // CALLME_HERMES_EXTRA_ARGS="--yolo" to skip command approval prompts
+    const extraArgs = (process.env.CALLME_HERMES_EXTRA_ARGS || '').split(/\s+/).filter(Boolean);
+    stdout = await runSubprocess('hermes', [...extraArgs, '-z', prompt], { timeoutMs, cwd, signal: options.signal });
   } else {
     // -o writes only the final agent message to a file (keeps the live
     // action log on stderr out of the reply). read-only sandbox avoids

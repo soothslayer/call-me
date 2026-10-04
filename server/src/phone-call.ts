@@ -115,7 +115,7 @@ export class CallManager {
    * The handler is responsible for running the conversation via
    * runInboundConversation(). Outbound MCP flows are unaffected.
    */
-  public onInboundCall: ((callControlId: string, from: string) => Promise<void>) | null = null;
+  public onInboundCall: ((callControlId: string, from: string, to: string) => Promise<void>) | null = null;
 
   constructor(config: ServerConfig) {
     this.config = config;
@@ -430,9 +430,11 @@ export class CallManager {
           // Call Control v2 sends `from` as a plain E.164 string; older payloads nested it
           const rawFrom = event.data?.payload?.from;
           const from = (typeof rawFrom === 'string' ? rawFrom : rawFrom?.phone_number) || 'unknown';
+          const rawTo = event.data?.payload?.to;
+          const to = (typeof rawTo === 'string' ? rawTo : rawTo?.phone_number) || '';
           if (direction === 'incoming' && this.onInboundCall) {
-            console.error(`Inbound call from ${from} (${callControlId})`);
-            this.onInboundCall(callControlId, from).catch((err) =>
+            console.error(`Inbound call from ${from} to ${to} (${callControlId})`);
+            this.onInboundCall(callControlId, from, to).catch((err) =>
               console.error('[inbound] handler error:', err instanceof Error ? err.message : err)
             );
           }

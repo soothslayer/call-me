@@ -19,6 +19,7 @@
 import { CallManager, loadServerConfig } from './phone-call.js';
 import { startNgrok, stopNgrok } from './ngrok.js';
 import {
+  AGENT_BACKENDS,
   isAgentBackend,
   backendLabel,
   runAgentTurn,
@@ -40,7 +41,7 @@ function printHelp(): void {
 call-me inbound mode — dial your Telnyx number and talk to an agent.
 
 Usage:
-  bun run inbound --backend <claude-code|codex> [options]
+  bun run inbound --backend <claude-code|codex|hermes> [options]
 
 Options:
   --backend <name>        Agent to talk to: claude-code or codex (required)
@@ -55,6 +56,12 @@ Environment:
   Same CALLME_* variables as the MCP server / CLI (see README), plus:
   CALLME_BARGE_IN             true (default) lets the caller interrupt the agent
                               mid-sentence; false turns that off.
+  CALLME_INBOUND_MENU         Comma-separated agents (e.g. claude-code,hermes).
+                              Callers to an unrouted number are asked which
+                              one they want, and can say "switch to ..." later.
+  CALLME_INBOUND_ROUTES       Comma-separated number=agent pairs, so each dialed
+                              number reaches its own agent. Others use --backend.
+  CALLME_HERMES_EXTRA_ARGS    Extra flags for the hermes CLI (e.g. --yolo).
   CALLME_INBOUND_PIN          If set, callers must say this PIN before reaching
                               the agent (3 tries, then hang up).
   CALLME_CLAUDE_EXTRA_ARGS    Extra flags for the claude CLI, space-separated
@@ -154,6 +161,57 @@ function callerNames(): Map<string, string> {
   return names;
 }
 
+/**
+ * Parse CALLME_INBOUND_ROUTES ("+15551234567=claude-code,+15557654321=hermes")
+ * so each dialed number reaches its own agent. Unlisted numbers use --backend.
+ */
+function numberRoutes(): Map<string, AgentBackend> {
+  const routes = new Map<string, AgentBackend>();
+  for (const entry of (process.env.CALLME_INBOUND_ROUTES || '').split(',')) {
+    const [num, backend] = entry.split('=').map((s) => s.trim());
+    if (!num || !backend) continue;
+    if (!isAgentBackend(backend)) {
+      console.error(`Warning: CALLME_INBOUND_ROUTES has unknown agent "${backend}", ignoring`);
+      continue;
+    }
+    routes.set(normalizeNumber(num), backend);
+  }
+  return routes;
+}
+
+/** Short spoken name for the menu ("Say Claude or Hermes"). */
+function shortName(backend: AgentBackend): string {
+  return backend === 'claude-code' ? 'Claude' : backendLabel(backend);
+}
+
+/** How each agent's name tends to come back from speech-to-text. */
+const AGENT_NAME_RE: Record<AgentBackend, RegExp> = {
+  'claude-code': /\b(claude|cloud|clawed|clod|claud)\b/i,
+  hermes: /\b(hermes|herm[eè]s|her ?mees|her ?mess|hermis|hermies)\b/i,
+  codex: /\b(codex|code ?x)\b/i,
+};
+
+/** Which menu agent, if any, the caller named. */
+function pickAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
+  return menu.find((b) => AGENT_NAME_RE[b].test(transcript));
+}
+
+/** "Switch to Hermes", "talk to Claude", "give me Hermes" mid-call. */
+const SWITCH_RE = /\b(switch|talk|go|change|put me through|connect me|give me|transfer)\b/i;
+
+/**
+ * Parse CALLME_INBOUND_MENU ("claude-code,hermes"): on numbers with no route,
+ * the caller is asked which agent they want.
+ */
+function agentMenu(): AgentBackend[] {
+  const menu: AgentBackend[] = [];
+  for (const name of (process.env.CALLME_INBOUND_MENU || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (isAgentBackend(name)) menu.push(name);
+    else console.error(`Warning: CALLME_INBOUND_MENU has unknown agent "${name}", ignoring`);
+  }
+  return menu;
+}
+
 const DIGIT_WORDS: Record<string, string> = {
   zero: '0', oh: '0', o: '0', one: '1', two: '2', to: '2', too: '2', three: '3',
   four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9',
@@ -187,18 +245,23 @@ async function main(): Promise<void> {
   }
 
   if (!isAgentBackend(args.backend)) {
-    console.error('Error: --backend must be one of: claude-code, codex\n');
+    console.error(`Error: --backend must be one of: ${AGENT_BACKENDS.join(', ')}\n`);
     printHelp();
     process.exit(1);
   }
 
   const names = callerNames();
   const pin = normalizeNumber(process.env.CALLME_INBOUND_PIN || '');
-  const greetingFor = (name: string | undefined) =>
+  const routes = numberRoutes();
+  const menu = agentMenu();
+  const menuPrompt = `Say ${menu.map(shortName).join(' or ')}.`;
+  if (menu.length > 1) console.error(`Menu: unrouted numbers ask for ${menu.map(backendLabel).join(' or ')}`);
+  const greetingFor = (name: string | undefined, backend: AgentBackend) =>
     args.greeting ||
     (pin
       ? `Hi${name ? ` ${name}` : ''}. Please say your PIN.`
-      : `Hey${name ? ` ${name}` : ''}! You're talking to ${backendLabel(args.backend)}. What's on your mind?`);
+      : `Hey${name ? ` ${name}` : ''}! You're talking to ${backendLabel(backend)}. What's on your mind?`);
+  for (const [num, backend] of routes) console.error(`Route: calls to ...${num.slice(-4)} go to ${backendLabel(backend)}`);
   console.error(pin ? 'Inbound PIN: required' : 'Inbound PIN: not set (CALLME_INBOUND_PIN)');
 
   const allowList = allowedCallers();
@@ -218,7 +281,7 @@ async function main(): Promise<void> {
   console.error(`\nInbound mode ready. Dial ${config.phoneNumber} to talk to ${backendLabel(args.backend)}.`);
   console.error('Press Ctrl+C to stop.\n');
 
-  callManager.onInboundCall = async (callControlId: string, from: string) => {
+  callManager.onInboundCall = async (callControlId: string, from: string, to: string) => {
     if (allowList !== null && !allowList.includes(normalizeNumber(from))) {
       console.error(`[inbound] Rejecting call from ${from} (not on allowlist)`);
       try {
@@ -230,15 +293,30 @@ async function main(): Promise<void> {
     }
 
     const callerName = names.get(normalizeNumber(from));
-    console.error(`[inbound] Caller: ${callerName ?? 'unnamed'} (${from})`);
+    const routed = routes.get(normalizeNumber(to));
+    const useMenu = !routed && menu.length > 1;
+    let backend = routed ?? args.backend;
+    let chosen = !useMenu;
+    console.error(`[inbound] Caller: ${callerName ?? 'unnamed'} (${from}), agent: ${useMenu ? 'menu' : backendLabel(backend)}`);
 
     let verified = !pin;
     let pinAttempts = 0;
 
+    const ready = (b: AgentBackend) => `You're talking to ${backendLabel(b)}. What's on your mind?`;
+    const choose = (b: AgentBackend, history: ConversationHistory) => {
+      backend = b;
+      chosen = true;
+      hooks.thinkingNotice = `${backendLabel(b)} is thinking. Say stop to interrupt.`;
+      history.length = 0;  // each agent starts the conversation fresh
+      console.error(`[inbound] ${from} chose ${backendLabel(b)}`);
+    };
+
     const hooks = {
-      greeting: greetingFor(callerName),
+      greeting: !pin && useMenu
+        ? `Hi${callerName ? ` ${callerName}` : ''}. ${menuPrompt}`
+        : greetingFor(callerName, backend),
       farewell: args.farewell,
-      thinkingNotice: `${backendLabel(args.backend)} is thinking. Say stop to interrupt.`,
+      thinkingNotice: `${backendLabel(backend)} is thinking. Say stop to interrupt.`,
       stoppedNotice: 'Listening.',
       onUserMessage: async (transcript: string, history: ConversationHistory, signal: AbortSignal) => {
         const trimmed = transcript.trim();
@@ -249,7 +327,7 @@ async function main(): Promise<void> {
           if (spokenDigits(trimmed).includes(pin)) {
             verified = true;
             console.error(`[inbound] PIN accepted from ${from}`);
-            return `Thanks. You're talking to ${backendLabel(args.backend)}. What's on your mind?`;
+            return chosen ? `Thanks. ${ready(backend)}` : `Thanks. ${menuPrompt}`;
           }
           pinAttempts++;
           console.error(`[inbound] Wrong PIN from ${from} (attempt ${pinAttempts}/${MAX_PIN_ATTEMPTS})`);
@@ -263,8 +341,29 @@ async function main(): Promise<void> {
         if (GOODBYE_RE.test(trimmed)) {
           return null; // triggers farewell + hangup
         }
+
+        if (!chosen) {
+          const picked = pickAgent(trimmed, menu);
+          if (!picked) {
+            history.length = 0;
+            return `Sorry. ${menuPrompt}`;
+          }
+          choose(picked, history);
+          return ready(picked);
+        }
+
+        // Mid-call switch, e.g. "switch to Hermes". Only short commands, so
+        // "let's talk about cloud storage" isn't taken as a switch to Claude.
+        if (useMenu && SWITCH_RE.test(trimmed) && trimmed.split(/\s+/).length <= 6) {
+          const picked = pickAgent(trimmed, menu);
+          if (picked && picked !== backend) {
+            choose(picked, history);
+            return `Switching. ${ready(picked)}`;
+          }
+        }
+
         try {
-          return await runAgentTurn(args.backend, history, trimmed, {
+          return await runAgentTurn(backend, history, trimmed, {
             timeoutMs: args.backendTimeoutMs,
             cwd: args.cwd,
             callerName,

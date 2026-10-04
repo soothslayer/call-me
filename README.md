@@ -173,6 +173,7 @@ Claude Code or Codex:
 cd server
 bun run inbound --backend claude-code
 bun run inbound --backend codex --greeting "Hey! Codex here. What's up?"
+bun run inbound --backend hermes
 ```
 
 How it works: the server answers the incoming call, transcribes what you say,
@@ -214,6 +215,15 @@ Security notes:
   the agent's turn. Saying it while the agent is talking cuts the speech off.
   Either way the call answers "Listening." and waits for the next request.
   This works whether barge-in is on or off.
+- **Hermes.** `--backend hermes` runs [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+  in one-shot mode (`hermes -z`). Pass flags with `CALLME_HERMES_EXTRA_ARGS`,
+  e.g. `--yolo` to skip command approval prompts.
+- **Pick an agent by voice.** `CALLME_INBOUND_MENU=claude-code,hermes` makes
+  the call ask "Say Claude or Hermes." after the PIN. Mid-call, a short
+  command like "switch to Hermes" changes agents (each starts fresh).
+- **One number per agent.** `CALLME_INBOUND_ROUTES=+15551234567=claude-code,+15557654321=hermes`
+  sends each dialed number straight to its agent with no menu. All numbers
+  must be on the same Telnyx Voice API application.
 - **Caller names.** Set `CALLME_CALLER_NAMES=+15551234567=Alice,+15557654321=Bob`
   so the greeting and the agent's prompt use the caller's name. Unnamed
   callers get a generic greeting.
