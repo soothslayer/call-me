@@ -321,6 +321,12 @@ async function main(): Promise<void> {
 
   // Same startup path as the CLI: config, HTTP server, ngrok tunnel.
   const config = loadServerConfig('');
+  // Echo the pacing alongside the STT provider's own silence line, so both
+  // halves of "how long will it wait for me" are verifiable at a glance.
+  console.error(
+    `Pacing: waits ${Math.round(config.transcriptTimeoutMs / 1000)}s for the caller to speak ` +
+      `(CALLME_TRANSCRIPT_TIMEOUT_MS), then the silence above ends their turn`
+  );
   const callManager = new CallManager(config);
   const port = await callManager.startServer();
   const publicUrl = await startNgrok(port);
