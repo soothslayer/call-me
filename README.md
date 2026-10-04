@@ -205,6 +205,10 @@ Security notes:
   before reaching the agent ("one two three four" or "twelve thirty four" both
   work). Three wrong tries and the call hangs up. The PIN is kept out of the
   conversation sent to the agent.
+- **Barge-in.** `CALLME_BARGE_IN=true` (the default) lets the caller talk
+  over the agent: playback stops and what they say becomes the next turn.
+  Set it to `false` if background noise or a speakerphone keeps cutting the
+  agent off.
 - **Caller names.** Set `CALLME_CALLER_NAMES=+15551234567=Alice,+15557654321=Bob`
   so the greeting and the agent's prompt use the caller's name. Unnamed
   callers get a generic greeting.

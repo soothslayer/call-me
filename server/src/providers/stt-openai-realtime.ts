@@ -41,6 +41,10 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
   private pendingTranscript = '';
   private onTranscriptCallback: ((transcript: string) => void) | null = null;
   private onPartialCallback: ((partial: string) => void) | null = null;
+  private onSpeechStartCallback: (() => void) | null = null;
+  // Transcripts that finished while nobody was waiting (caller spoke while the
+  // agent was talking or thinking). Handed to the next waitForTranscript.
+  private queuedTranscripts: string[] = [];
   private closed = false;  // True when intentionally closed
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
@@ -181,7 +185,11 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
       case 'conversation.item.input_audio_transcription.completed':
         console.error(`[RealtimeSTT] Transcript: ${event.transcript}`);
         if (event.transcript) {
-          this.onTranscriptCallback?.(event.transcript);
+          if (this.onTranscriptCallback) {
+            this.onTranscriptCallback(event.transcript);
+          } else {
+            this.queuedTranscripts.push(event.transcript);
+          }
         }
         this.pendingTranscript = '';
         break;
@@ -189,6 +197,7 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
       case 'input_audio_buffer.speech_started':
         console.error('[RealtimeSTT] Speech started');
         this.pendingTranscript = '';
+        this.onSpeechStartCallback?.();
         break;
 
       case 'input_audio_buffer.speech_stopped':
@@ -223,7 +232,13 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
     this.onPartialCallback = callback;
   }
 
+  onSpeechStart(callback: () => void): void {
+    this.onSpeechStartCallback = callback;
+  }
+
   async waitForTranscript(timeoutMs: number = 30000): Promise<string> {
+    const queued = this.queuedTranscripts.shift();
+    if (queued !== undefined) return queued;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.onTranscriptCallback = null;

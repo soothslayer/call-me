@@ -53,6 +53,8 @@ Options:
 
 Environment:
   Same CALLME_* variables as the MCP server / CLI (see README), plus:
+  CALLME_BARGE_IN             true (default) lets the caller interrupt the agent
+                              mid-sentence; false turns that off.
   CALLME_INBOUND_PIN          If set, callers must say this PIN before reaching
                               the agent (3 tries, then hang up).
   CALLME_CLAUDE_EXTRA_ARGS    Extra flags for the claude CLI, space-separated

@@ -27,6 +27,8 @@ interface CallState {
   startTime: number;
   hungUp: boolean;
   sttSession: RealtimeSTTSession | null;
+  speaking: boolean;  // True while agent audio is being sent
+  interrupted: boolean;  // Set when the caller talks over the agent (barge-in)
 }
 
 export interface ServerConfig {
@@ -497,9 +499,12 @@ export class CallManager {
       startTime: Date.now(),
       hungUp: false,
       sttSession,
+      speaking: false,
+      interrupted: false,
     };
 
     this.activeCalls.set(callId, state);
+    sttSession.onSpeechStart?.(() => this.handleBargeIn(state));
 
     try {
       const callControlId = await this.config.providers.phone.initiateCall(
@@ -629,8 +634,11 @@ export class CallManager {
       startTime: Date.now(),
       hungUp: false,
       sttSession,
+      speaking: false,
+      interrupted: false,
     };
     this.activeCalls.set(callId, state);
+    sttSession.onSpeechStart?.(() => this.handleBargeIn(state));
     this.callControlIdToCallId.set(callControlId, callId);
     this.wsTokenToCallId.set(wsToken, callId);
 
@@ -661,6 +669,9 @@ export class CallManager {
 
         history.push({ speaker: 'agent', message: reply });
         await this.speak(state, reply);
+        if (state.interrupted) {
+          history[history.length - 1].message += ' [cut off: the caller interrupted]';
+        }
       }
     } catch (error) {
       console.error(`[${callId}] Inbound call error:`, error instanceof Error ? error.message : error);
@@ -727,15 +738,37 @@ export class CallManager {
     state.ws.send(JSON.stringify(message));
   }
 
+  /**
+   * Barge-in: the caller started talking while the agent was speaking.
+   * Stop sending audio and tell the provider to drop what it has buffered.
+   * What the caller says is queued by the STT session as the next turn.
+   */
+  private handleBargeIn(state: CallState): void {
+    if (!state.speaking || state.interrupted || process.env.CALLME_BARGE_IN === 'false') return;
+    state.interrupted = true;
+    console.error(`[${state.callId}] Barge-in: caller interrupted, stopping playback`);
+    if (state.ws?.readyState === WebSocket.OPEN) {
+      const clear: Record<string, unknown> = { event: 'clear' };
+      if (state.streamSid) clear.streamSid = state.streamSid;
+      state.ws.send(JSON.stringify(clear));
+    }
+  }
+
   private async sendPreGeneratedAudio(state: CallState, muLawData: Buffer): Promise<void> {
     console.error(`[${state.callId}] Sending pre-generated audio...`);
-    const chunkSize = 160;  // 20ms at 8kHz
-    for (let i = 0; i < muLawData.length; i += chunkSize) {
-      this.sendMediaChunk(state, muLawData.subarray(i, i + chunkSize));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    state.speaking = true;
+    state.interrupted = false;
+    try {
+      const chunkSize = 160;  // 20ms at 8kHz
+      for (let i = 0; i < muLawData.length && !state.interrupted; i += chunkSize) {
+        this.sendMediaChunk(state, muLawData.subarray(i, i + chunkSize));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Small delay to ensure audio finishes playing before listening
+      if (!state.interrupted) await new Promise((resolve) => setTimeout(resolve, 200));
+    } finally {
+      state.speaking = false;
     }
-    // Small delay to ensure audio finishes playing before listening
-    await new Promise((resolve) => setTimeout(resolve, 200));
     console.error(`[${state.callId}] Audio sent`);
   }
 
@@ -749,16 +782,22 @@ export class CallManager {
 
     const tts = this.config.providers.tts;
 
-    // Use streaming if available for lower latency
-    if (tts.synthesizeStream) {
-      await this.speakStreaming(state, text, tts.synthesizeStream.bind(tts));
-    } else {
-      const pcmData = await tts.synthesize(text);
-      await this.sendAudio(state, pcmData);
-    }
+    state.speaking = true;
+    state.interrupted = false;
+    try {
+      // Use streaming if available for lower latency
+      if (tts.synthesizeStream) {
+        await this.speakStreaming(state, text, tts.synthesizeStream.bind(tts));
+      } else {
+        const pcmData = await tts.synthesize(text);
+        await this.sendAudio(state, pcmData);
+      }
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    console.error(`[${state.callId}] Speaking done`);
+      if (!state.interrupted) await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      state.speaking = false;
+    }
+    console.error(`[${state.callId}] Speaking ${state.interrupted ? 'interrupted' : 'done'}`);
   }
 
   private async speakStreaming(
@@ -780,7 +819,7 @@ export class CallManager {
 
     // Helper to drain and send buffered mu-law audio in chunks
     const drainBuffer = async () => {
-      while (pendingMuLaw.length >= OUTPUT_CHUNK_SIZE) {
+      while (pendingMuLaw.length >= OUTPUT_CHUNK_SIZE && !state.interrupted) {
         this.sendMediaChunk(state, pendingMuLaw.subarray(0, OUTPUT_CHUNK_SIZE));
         pendingMuLaw = pendingMuLaw.subarray(OUTPUT_CHUNK_SIZE);
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -788,6 +827,7 @@ export class CallManager {
     };
 
     for await (const chunk of synthesizeStream(text)) {
+      if (state.interrupted) break;
       pendingPcm = Buffer.concat([pendingPcm, chunk]);
 
       const completeUnits = Math.floor(pendingPcm.length / SAMPLES_PER_RESAMPLE);
@@ -814,7 +854,7 @@ export class CallManager {
     await drainBuffer();
 
     // Send any final partial chunk
-    if (pendingMuLaw.length > 0) {
+    if (pendingMuLaw.length > 0 && !state.interrupted) {
       this.sendMediaChunk(state, pendingMuLaw);
     }
   }
@@ -824,7 +864,7 @@ export class CallManager {
     const muLawData = this.pcmToMuLaw(resampledPcm);
 
     const chunkSize = 160;
-    for (let i = 0; i < muLawData.length; i += chunkSize) {
+    for (let i = 0; i < muLawData.length && !state.interrupted; i += chunkSize) {
       this.sendMediaChunk(state, muLawData.subarray(i, i + chunkSize));
       await new Promise((resolve) => setTimeout(resolve, 20));
     }

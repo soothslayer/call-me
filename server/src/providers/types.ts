@@ -94,6 +94,11 @@ export interface RealtimeSTTSession {
   onPartial(callback: (partial: string) => void): void;
 
   /**
+   * Set callback fired when the caller starts speaking (VAD), used for barge-in
+   */
+  onSpeechStart?(callback: () => void): void;
+
+  /**
    * Close the session
    */
   close(): void;
