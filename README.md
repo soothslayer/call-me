@@ -116,6 +116,53 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 
 Restart Claude Code. Done!
 
+### Other agents: Codex, Muse, and anything with a shell
+
+The MCP server (`server/src/index.ts`) is a plain stdio server — only the
+plugin packaging above is Claude Code-specific. Steps 1–3 (provider accounts
+and environment variables) are the same for every agent.
+
+**Codex.** Point Codex at the same server. Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.callme]
+command = "bun"
+args = ["run", "/absolute/path/to/call-me/server/src/index.ts"]
+tool_timeout_sec = 300
+
+[mcp_servers.callme.env]
+CALLME_PHONE_PROVIDER = "telnyx"
+CALLME_PHONE_ACCOUNT_SID = "your-connection-id"
+CALLME_PHONE_AUTH_TOKEN = "your-api-key"
+CALLME_PHONE_NUMBER = "+15551234567"
+CALLME_USER_PHONE_NUMBER = "+15559876543"
+CALLME_OPENAI_API_KEY = "sk-..."
+CALLME_NGROK_AUTHTOKEN = "your-ngrok-token"
+```
+
+(Or: `codex mcp add callme -- bun run /absolute/path/to/call-me/server/src/index.ts`,
+then restart Codex.) Calls can take a few minutes — the raised
+`tool_timeout_sec` keeps Codex from giving up mid-conversation.
+
+**Muse / shell agents (no MCP client needed).** This fork adds a standalone
+CLI that drives the same call flow without an MCP client:
+
+```bash
+cd server
+bun run call --message "Hey! Your build finished. Want me to deploy it?"
+```
+
+The user's spoken reply is printed to stdout so the agent can capture it.
+Options:
+
+```bash
+bun run call --message "..." --goodbye "Talk soon!"   # closing line
+bun run call --message "..." --interactive             # follow-up prompts on stdin (empty line hangs up)
+```
+
+Set `CALLME_TRANSCRIPT_TIMEOUT_MS` to bound how long each listen waits for a
+reply (default 180000 ms). Same `CALLME_*` environment variables as above.
+
 ---
 
 ## How It Works

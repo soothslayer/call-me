@@ -7,7 +7,8 @@
   "scripts": {
     "prestart": "bun install --silent",
     "start": "bun run src/index.ts",
-    "dev": "bun --watch src/index.ts"
+    "dev": "bun --watch src/index.ts",
+    "call": "bun run src/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
