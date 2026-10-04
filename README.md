@@ -241,6 +241,26 @@ Security notes:
   To let it act without approval prompts, set
   `CALLME_CLAUDE_EXTRA_ARGS=--dangerously-skip-permissions` (it can then run
   any command, so keep the caller allowlist tight).
+- **Response time: trim the MCP servers.** Every turn spawns a fresh
+  `claude -p`, and that process connects to all of your configured MCP
+  servers before the model sees a word. On a machine with nine global
+  servers this measured ~4.6s of cold start per turn; restricting it to two
+  cut that to ~2.7s. Add `--strict-mcp-config` to use *only* the servers in
+  a config you name, and keep just the ones worth having on a phone call:
+
+  ```bash
+  # ~/phone-mcp.json — only what the agent needs while on a call
+  { "mcpServers": { "perplexity": { ... }, "memory": { ... } } }
+  ```
+  ```bash
+  CALLME_CLAUDE_EXTRA_ARGS="--dangerously-skip-permissions --strict-mcp-config --mcp-config /path/to/phone-mcp.json"
+  ```
+
+  Built-in tools (Bash, Read, Edit, …) are not MCP servers and are
+  unaffected, so the agent can still do things — it just stops paying to
+  dial up servers it won't use. `--strict-mcp-config` with no
+  `--mcp-config` loads none at all. Worth skipping any server that *talks
+  to the call itself*, since it can't be used from inside a turn anyway.
 
 ---
 
