@@ -242,6 +242,22 @@ function pickMenuAgent(transcript: string, menu: AgentBackend[]): AgentBackend |
 }
 
 /** "Switch to Hermes", "talk to Claude", "give me Hermes" mid-call. */
+/** Words that can surround a bare agent name without changing its meaning. */
+const BARE_NAME_FILLER = new Set(['ok', 'okay', 'um', 'uh', 'hey', 'please', 'now', 'code']);
+
+/**
+ * A transcript that is nothing but an agent's name ("Claude.", "Hermes
+ * please") is a request to switch. Buck said just "Claude" mid-call and it
+ * went to Hermes as a message, which then claimed to switch without doing so.
+ */
+function bareAgentName(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
+  const words = transcript.toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/)
+    .filter((w) => w && !BARE_NAME_FILLER.has(w));
+  if (words.length === 0 || words.length > 2) return undefined;
+  const rest = words.join(' ');
+  return menu.find((b) => new RegExp(`^${AGENT_NAME_RE[b].source}$`, 'i').test(rest));
+}
+
 const SWITCH_RE = /\b(switch|talk|go|change|put me through|connect me|give me|transfer)\b/i;
 
 /**
@@ -302,6 +318,8 @@ async function main(): Promise<void> {
   const menuPrompt = `Say ${menu.map(shortName).join(' or ')}.`;
   // After a miss, offer positions instead: single digits transcribe reliably
   // over a phone line where a bare name does not.
+  // Told once, before the menu, so callers know the name alone switches.
+  const switchHint = 'To change agents later, just say their name.';
   const menuRetryPrompt = `Say ${menu.map((b, i) => `${i + 1} for ${shortName(b)}`).join(', or ')}.`;
   if (menu.length > 1) console.error(`Menu: unrouted numbers ask for ${menu.map(backendLabel).join(' or ')}`);
   const greetingFor = (name: string | undefined, backend: AgentBackend) =>
@@ -385,7 +403,7 @@ async function main(): Promise<void> {
 
     const hooks = {
       greeting: !pin && useMenu
-        ? `Hi${callerName ? ` ${callerName}` : ''}. ${menuPrompt}`
+        ? `Hi${callerName ? ` ${callerName}` : ''}. ${switchHint} ${menuPrompt}`
         : greetingFor(callerName, backend),
       farewell: args.farewell,
       thinkingNotice: `${backendLabel(backend)} is thinking. Say stop to interrupt.`,
@@ -399,7 +417,7 @@ async function main(): Promise<void> {
           if (spokenDigits(trimmed).includes(pin)) {
             verified = true;
             console.error(`[inbound] PIN accepted from ${from}`);
-            return chosen ? `Thanks. ${ready(backend)}` : `Thanks. ${menuPrompt}`;
+            return chosen ? `Thanks. ${ready(backend)}` : `Thanks. ${switchHint} ${menuPrompt}`;
           }
           pinAttempts++;
           console.error(`[inbound] Wrong PIN from ${from} (attempt ${pinAttempts}/${MAX_PIN_ATTEMPTS})`);
@@ -428,8 +446,13 @@ async function main(): Promise<void> {
 
         // Mid-call switch, e.g. "switch to Hermes". Only short commands, so
         // "let's talk about cloud storage" isn't taken as a switch to Claude.
-        if (useMenu && SWITCH_RE.test(trimmed) && trimmed.split(/\s+/).length <= 6) {
-          const picked = pickAgent(trimmed, menu);
+        // Or just the agent's name on its own, e.g. "Claude."
+        if (useMenu) {
+          const bare = bareAgentName(trimmed, menu);
+          const picked = bare ?? (SWITCH_RE.test(trimmed) && trimmed.split(/\s+/).length <= 6
+            ? pickAgent(trimmed, menu)
+            : undefined);
+          if (picked === backend && bare) return `You're already talking to ${backendLabel(picked)}.`;
           if (picked && picked !== backend) {
             choose(picked, history);
             return `Switching. ${ready(picked)}`;
