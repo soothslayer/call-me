@@ -8,9 +8,9 @@
 
 import { unlink } from 'node:fs/promises';
 
-export type AgentBackend = 'claude-code' | 'codex' | 'hermes';
+export type AgentBackend = 'claude-code' | 'codex' | 'hermes' | 'omarchy';
 
-export const AGENT_BACKENDS: AgentBackend[] = ['claude-code', 'codex', 'hermes'];
+export const AGENT_BACKENDS: AgentBackend[] = ['claude-code', 'codex', 'hermes', 'omarchy'];
 
 export function isAgentBackend(value: string): value is AgentBackend {
   return (AGENT_BACKENDS as string[]).includes(value);
@@ -19,7 +19,9 @@ export function isAgentBackend(value: string): value is AgentBackend {
 /**
  * Whether runAgentTurnStream can drive this backend. Claude and Codex both
  * emit newline-delimited JSON we can parse incrementally; `hermes -z` only
- * prints its final reply, so it has to go through runAgentTurn.
+ * prints its final reply, so it has to go through runAgentTurn. Omarchy is
+ * Claude over ssh, and stays on the blocking path until streaming has been
+ * verified end to end through the tunnel.
  */
 export function supportsStreaming(backend: AgentBackend): boolean {
   return backend === 'claude-code' || backend === 'codex';
@@ -28,6 +30,7 @@ export function supportsStreaming(backend: AgentBackend): boolean {
 export function backendLabel(backend: AgentBackend): string {
   if (backend === 'claude-code') return 'Claude Code';
   if (backend === 'hermes') return 'Hermes';
+  if (backend === 'omarchy') return 'Omarchy';
   return 'Codex';
 }
 
@@ -99,6 +102,16 @@ export async function runAgentTurn(
     // CALLME_HERMES_EXTRA_ARGS="--yolo" to skip command approval prompts
     const extraArgs = (process.env.CALLME_HERMES_EXTRA_ARGS || '').split(/\s+/).filter(Boolean);
     stdout = await runSubprocess('hermes', [...extraArgs, '-z', prompt], { timeoutMs, cwd, signal: options.signal });
+  } else if (backend === 'omarchy') {
+    const [command, ...args] = omarchyCommand(prompt);
+    try {
+      stdout = await runSubprocess(command, args, { timeoutMs, cwd, signal: options.signal });
+    } catch (error) {
+      // The VM's Claude has its own login. Say so, rather than the generic
+      // "hit a snag", since nothing on the phone can fix it.
+      if (!(error instanceof Error && /not logged in/i.test(error.message))) throw error;
+      stdout = "Claude in the Omarchy VM isn't logged in yet. Someone needs to log in there first.";
+    }
   } else {
     // -o writes only the final agent message to a file (keeps the live
     // action log on stderr out of the reply). read-only sandbox avoids
@@ -122,6 +135,40 @@ export async function runAgentTurn(
     throw new Error(`${backendLabel(backend)} returned an empty reply`);
   }
   return cleaned;
+}
+
+/** Quote one word for a POSIX shell, so ssh can't split or expand it. */
+export function shellQuote(word: string): string {
+  return `'${word.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * argv for an Omarchy turn: Claude Code inside the Omarchy VM, over ssh.
+ *
+ *   CALLME_OMARCHY_HOST      user@host to ssh to (e.g. buck@192.168.68.64)
+ *   CALLME_OMARCHY_SSH_ARGS  extra ssh flags (e.g. -i ~/.ssh/id_ed25519)
+ *   CALLME_OMARCHY_COMMAND   remote command; the prompt is appended as -p '...'
+ *
+ * ssh joins its arguments into one string for the remote shell, so the
+ * prompt has to be quoted for that shell, not just passed as an argv entry.
+ * BatchMode makes a missing key fail fast instead of waiting on a password
+ * prompt nobody on the phone can answer.
+ */
+export function omarchyCommand(prompt: string): string[] {
+  const host = process.env.CALLME_OMARCHY_HOST;
+  if (!host) throw new Error('CALLME_OMARCHY_HOST is not set');
+  const sshArgs = (process.env.CALLME_OMARCHY_SSH_ARGS || '').split(/\s+/).filter(Boolean);
+  const remote =
+    process.env.CALLME_OMARCHY_COMMAND || '~/.local/bin/claude --dangerously-skip-permissions';
+  return [
+    'ssh',
+    '-T',
+    '-o', 'BatchMode=yes',
+    '-o', 'ConnectTimeout=10',
+    ...sshArgs,
+    host,
+    `${remote} -p ${shellQuote(prompt)}`,
+  ];
 }
 
 /**
@@ -356,7 +403,8 @@ export async function* runAgentTurnStream(
   const prompt = buildAgentPrompt(backend, history, userMessage, options.callerName);
 
   if (!supportsStreaming(backend)) {
-    // hermes -z has no JSONL mode; callers should check supportsStreaming()
+    // hermes -z has no JSONL mode, and omarchy is unverified over ssh;
+    // callers should check supportsStreaming()
     // and use runAgentTurn instead. Guard so a future backend can't silently
     // get spawned as the wrong binary.
     throw new Error(`${backendLabel(backend)} does not support streaming`);
@@ -525,7 +573,9 @@ async function runSubprocess(
   }
 
   if (exitCode !== 0) {
-    throw new Error(`${command} exited with code ${exitCode}: ${stderr.slice(-300)}`);
+    // claude -p reports some failures ("Not logged in") on stdout, not stderr.
+    const detail = stderr || stdout.trim();
+    throw new Error(`${command} exited with code ${exitCode}: ${detail.slice(-300)}`);
   }
   return stdout;
 }

@@ -44,7 +44,7 @@ function printHelp(): void {
 call-me inbound mode — dial your Telnyx number and talk to an agent.
 
 Usage:
-  bun run inbound --backend <claude-code|codex|hermes> [options]
+  bun run inbound --backend <claude-code|codex|hermes|omarchy> [options]
 
 Options:
   --backend <name>        Agent to talk to: claude-code or codex (required)
@@ -68,6 +68,12 @@ Environment:
   CALLME_INBOUND_ROUTES       Comma-separated number=agent pairs, so each dialed
                               number reaches its own agent. Others use --backend.
   CALLME_HERMES_EXTRA_ARGS    Extra flags for the hermes CLI (e.g. --yolo).
+  CALLME_OMARCHY_HOST         user@host of the Omarchy VM; the omarchy agent runs
+                              Claude Code there over ssh.
+  CALLME_OMARCHY_SSH_ARGS     Extra ssh flags (e.g. -i /path/to/key).
+  CALLME_OMARCHY_COMMAND      Remote command, prompt appended as -p '...'
+                              (default: ~/.local/bin/claude
+                              --dangerously-skip-permissions).
   CALLME_INBOUND_PIN          If set, callers must say this PIN before reaching
                               the agent (3 tries, then hang up).
   CALLME_CLAUDE_EXTRA_ARGS    Extra flags for the claude CLI, space-separated
@@ -197,11 +203,28 @@ function shortName(backend: AgentBackend): string {
   return backend === 'claude-code' ? 'Claude' : backendLabel(backend);
 }
 
+/** "Claude or Hermes", "Claude, Hermes, or Omarchy". */
+function spokenList(items: string[]): string {
+  if (items.length <= 2) return items.join(' or ');
+  return `${items.slice(0, -1).join(', ')}, or ${items[items.length - 1]}`;
+}
+
+/** The first menu prompt, e.g. "Say Claude, Hermes, or Omarchy." */
+export function menuPromptFor(menu: AgentBackend[]): string {
+  return `Say ${spokenList(menu.map(shortName))}.`;
+}
+
+/** After a miss, e.g. "Say 1 for Claude, 2 for Hermes, or 3 for Omarchy." */
+export function menuRetryPromptFor(menu: AgentBackend[]): string {
+  return `Say ${spokenList(menu.map((b, i) => `${i + 1} for ${shortName(b)}`))}.`;
+}
+
 /** How each agent's name tends to come back from speech-to-text. */
 const AGENT_NAME_RE: Record<AgentBackend, RegExp> = {
   'claude-code': /\b(claude|cloud|clawed|clod|claud)\b/i,
   hermes: /\b(hermes|herm[eè]s|her ?mees|her ?mess|hermis|hermies)\b/i,
   codex: /\b(codex|code ?x)\b/i,
+  omarchy: /\b(omarchy|omarchi|o ?marchy|oh ?marchy|omar ?key|oh ?marky|omachi)\b/i,
 };
 
 /**
@@ -217,10 +240,15 @@ const AGENT_MENU_RE: Record<AgentBackend, RegExp> = {
     /\b(claude|claud|clause|cloud|clawed|claw|clod|cod|code|coad|bob|blob|klob|clob|glob|odd|aud|quad|laud|lord|flawed|fraud|god)\b/i,
   hermes: /\b(hermes|herm[eè]s|her ?mees|her ?mess|hermis|hermies|herpes|hermeez|harmies)\b/i,
   codex: /\b(codex|code ?x|kodex)\b/i,
+  // Not a word any transcriber knows, so expect it split or respelled:
+  // "Oh Marky", "Omar key", "Omachi", or snapped to a real word like
+  // "anarchy" or "monarchy".
+  omarchy:
+    /\b(omarchy|omarchi|omarchie|omarky|omarkey|omachi|omachy|omarch|o ?marchy|oh ?marchy|oh ?marchie|oh ?marky|oh ?markey|oh ?mark ?e|omar ?key|omar ?kee|omar ?ki|omar ?chi|omar ?che|omar|o'?machi|oh ?machi|anarchy|monarchy|malarkey|marky|markey)\b/i,
 };
 
 /** Which menu agent, if any, the caller named. */
-function pickAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
+export function pickAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
   return menu.find((b) => AGENT_NAME_RE[b].test(transcript));
 }
 
@@ -230,7 +258,7 @@ function pickAgent(transcript: string, menu: AgentBackend[]): AgentBackend | und
  * better than a single proper noun, so they're the fallback we offer after a
  * failed attempt.
  */
-function pickMenuAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
+export function pickMenuAgent(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
   const byName = menu.find((b) => AGENT_MENU_RE[b].test(transcript));
   if (byName) return byName;
   const digits = spokenDigits(transcript);
@@ -250,7 +278,7 @@ const BARE_NAME_FILLER = new Set(['ok', 'okay', 'um', 'uh', 'hey', 'please', 'no
  * please") is a request to switch. Buck said just "Claude" mid-call and it
  * went to Hermes as a message, which then claimed to switch without doing so.
  */
-function bareAgentName(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
+export function bareAgentName(transcript: string, menu: AgentBackend[]): AgentBackend | undefined {
   const words = transcript.toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/)
     .filter((w) => w && !BARE_NAME_FILLER.has(w));
   if (words.length === 0 || words.length > 2) return undefined;
@@ -315,12 +343,12 @@ async function main(): Promise<void> {
   const pin = normalizeNumber(process.env.CALLME_INBOUND_PIN || '');
   const routes = numberRoutes();
   const menu = agentMenu();
-  const menuPrompt = `Say ${menu.map(shortName).join(' or ')}.`;
+  const menuPrompt = menuPromptFor(menu);
   // After a miss, offer positions instead: single digits transcribe reliably
   // over a phone line where a bare name does not.
   // Told once, before the menu, so callers know the name alone switches.
   const switchHint = 'To change agents later, just say their name.';
-  const menuRetryPrompt = `Say ${menu.map((b, i) => `${i + 1} for ${shortName(b)}`).join(', or ')}.`;
+  const menuRetryPrompt = menuRetryPromptFor(menu);
   if (menu.length > 1) console.error(`Menu: unrouted numbers ask for ${menu.map(backendLabel).join(' or ')}`);
   const greetingFor = (name: string | undefined, backend: AgentBackend) =>
     args.greeting ||
@@ -514,7 +542,10 @@ async function main(): Promise<void> {
   await new Promise(() => {});
 }
 
-main().catch((error) => {
-  console.error('Fatal error:', error instanceof Error ? error.message : error);
-  process.exit(1);
-});
+// Only when run, not when imported (the tests import the menu matching).
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error('Fatal error:', error instanceof Error ? error.message : error);
+    process.exit(1);
+  });
+}

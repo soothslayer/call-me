@@ -97,7 +97,7 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
                   prompt:
                     process.env.CALLME_STT_PROMPT ||
                     'The caller is talking to an AI coding assistant on the phone. ' +
-                      'Expected names: Claude, Claude Code, Hermes, Codex.',
+                      'Expected names: Claude, Claude Code, Hermes, Codex, Omarchy.',
                 },
                 turn_detection: {
                   type: 'server_vad',
